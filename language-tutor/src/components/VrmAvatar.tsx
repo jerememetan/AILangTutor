@@ -1,27 +1,50 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMUtils } from '@pixiv/three-vrm';
 import type { VRM } from '@pixiv/three-vrm';
 
+import createPreviewFigure from './createPreviewFigure';
+import createVrmModelCache from './vrmModelCache';
+
+const noPreloads: string[] = [];
+
 type VrmAvatarProps = {
-  src: string;
+  src?: string;
+  previewId?: string;
+  preloadSources?: string[];
+  onPreviewReady?: (id: string) => void;
   speaking?: boolean;
 };
 
 /** Loads a local VRM and renders an animated tutor into its host element. */
-export default function VrmAvatar({ src, speaking = false }: VrmAvatarProps) {
+export default function VrmAvatar({
+  src,
+  previewId,
+  preloadSources = noPreloads,
+  onPreviewReady,
+  speaking = false,
+}: VrmAvatarProps) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const viewer = useRef<{
+    subject: THREE.Group;
+    cache: ReturnType<typeof createVrmModelCache>;
+    prepare?: (avatar: VRM) => void;
+    draw: () => void;
+    avatar?: VRM;
+    source?: string;
+    fallback?: THREE.Group;
+  } | null>(null);
+  const inPicker = Boolean(previewId);
   const speakingRef = useRef(speaking);
   const [loaded, setLoaded] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
   speakingRef.current = speaking;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host || window.location.protocol === 'file:') return;
-    let disposed = false;
     let frameId = 0;
-    let avatar: VRM | undefined;
+
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(29, 1, 0.1, 100);
     camera.position.set(0, 1.35, 3.7);
@@ -30,8 +53,37 @@ export default function VrmAvatar({ src, speaking = false }: VrmAvatarProps) {
     try {
       renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
     } catch {
-      return; // Keep the illustrated tutor when this browser has no WebGL context.
+      setUnavailable(true);
+      return;
     }
+    const subject = new THREE.Group();
+    const warmupTarget = inPicker ? new THREE.WebGLRenderTarget(1, 1) : undefined;
+    const warmed = new WeakSet<VRM>();
+    const state = {
+      subject,
+      cache: createVrmModelCache(),
+      draw: () => renderer.render(scene, camera),
+      prepare: warmupTarget
+        ? (avatar: VRM) => {
+            if (warmed.has(avatar)) return;
+            // Upload textures and geometry on the same renderer, off the visible canvas.
+            subject.visible = false;
+            scene.add(avatar.scene);
+            const previousTarget = renderer.getRenderTarget();
+            try {
+              renderer.setRenderTarget(warmupTarget);
+              renderer.render(scene, camera);
+              warmed.add(avatar);
+            } finally {
+              renderer.setRenderTarget(previousTarget);
+              scene.remove(avatar.scene);
+              subject.visible = true;
+            }
+          }
+        : undefined,
+    };
+    viewer.current = state;
+    scene.add(subject);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.setClearColor(0x000000, 0);
@@ -47,6 +99,11 @@ export default function VrmAvatar({ src, speaking = false }: VrmAvatarProps) {
     const resize = () => {
       if (!host.clientWidth || !host.clientHeight) return;
       camera.aspect = host.clientWidth / host.clientHeight;
+      if (inPicker) {
+        const distance = Math.max(4.65, 1.85 / camera.aspect);
+        camera.position.set(0, 1.16, distance);
+        camera.lookAt(0, 1.03, 0);
+      }
       camera.updateProjectionMatrix();
       renderer.setSize(host.clientWidth, host.clientHeight, false);
     };
@@ -54,49 +111,90 @@ export default function VrmAvatar({ src, speaking = false }: VrmAvatarProps) {
     observer.observe(host);
     resize();
 
-    const loader = new GLTFLoader();
-    loader.register((parser) => new VRMLoaderPlugin(parser));
-    loader.load(src, (gltf) => {
-      if (disposed) return;
-      avatar = gltf.userData.vrm as VRM | undefined;
-      if (!avatar) {
-        return;
-      }
-      VRMUtils.rotateVRM0(avatar);
-      const bounds = new THREE.Box3().setFromObject(avatar.scene);
-      const height = Math.max(bounds.max.y - bounds.min.y, 0.01);
-      const scale = 2.05 / height;
-      const center = bounds.getCenter(new THREE.Vector3());
-      avatar.scene.scale.setScalar(scale);
-      avatar.scene.position.set(-center.x * scale, -bounds.min.y * scale, -center.z * scale);
-      scene.add(avatar.scene);
-      setLoaded(true);
-    }, undefined, () => undefined);
-
     const clock = new THREE.Clock();
     let elapsed = 0;
     const render = () => {
       frameId = window.requestAnimationFrame(render);
       const delta = clock.getDelta();
       elapsed += delta;
+      subject.rotation.y = (inPicker ? -0.13 : 0) + Math.sin(elapsed * 0.35) * 0.045;
+      const avatar = viewer.current?.avatar;
       if (avatar) {
         avatar.update(delta);
-        avatar.scene.rotation.y = Math.sin(elapsed * 0.35) * 0.045;
-        avatar.expressionManager?.setValue('aa', speakingRef.current ? 0.13 + Math.max(0, Math.sin(elapsed * 12)) * 0.32 : 0);
+        avatar.expressionManager?.setValue(
+          'aa',
+          speakingRef.current ? 0.13 + Math.max(0, Math.sin(elapsed * 12)) * 0.32 : 0,
+        );
       }
-      renderer.render(scene, camera);
+      state.draw();
     };
     render();
 
     return () => {
-      disposed = true;
       window.cancelAnimationFrame(frameId);
       observer.disconnect();
-      if (avatar) VRMUtils.deepDispose(avatar.scene);
+      if (viewer.current?.fallback) VRMUtils.deepDispose(viewer.current.fallback);
+      viewer.current = null;
+      subject.clear();
+      state.cache.retain([]);
+      warmupTarget?.dispose();
       renderer.dispose();
+      renderer.forceContextLoss();
       renderer.domElement.remove();
     };
-  }, [src]);
+  }, [inPicker]);
 
-  return <div ref={hostRef} className={`vrm-avatar ${loaded ? 'vrm-ready' : ''}`} aria-label="Animated 3D tutor" />;
+  useEffect(() => {
+    const state = viewer.current;
+    if (!state) {
+      if (previewId) onPreviewReady?.(previewId);
+      return;
+    }
+    const { subject, cache } = state;
+    let cancelled = false;
+    const warmupTimers: number[] = [];
+    cache.retain([state.source, src, ...preloadSources]);
+
+    const showTutor = async () => {
+      const avatar = src ? await cache.get(src) : undefined;
+      if (cancelled) return;
+
+      subject.clear();
+      if (state.fallback) VRMUtils.deepDispose(state.fallback);
+      state.fallback = avatar || !previewId ? undefined : createPreviewFigure(previewId);
+      state.avatar = avatar;
+      state.source = avatar ? src : undefined;
+      if (avatar) subject.add(avatar.scene);
+      if (state.fallback) subject.add(state.fallback);
+      if (previewId) state.draw();
+      setLoaded(Boolean(avatar || state.fallback));
+      if (previewId) onPreviewReady?.(previewId);
+
+      cache.retain([src, ...preloadSources]);
+      const warmAfter = performance.now() + 300;
+      for (const neighbor of preloadSources) {
+        if (cancelled) break;
+        const upcoming = await cache.get(neighbor);
+        if (!cancelled && upcoming && upcoming !== state.avatar) {
+          // Keep background GPU uploads outside the visible tutor reveal.
+          const delay = Math.max(0, warmAfter - performance.now()) + warmupTimers.length * 32;
+          warmupTimers.push(window.setTimeout(() => state.prepare?.(upcoming), delay));
+        }
+      }
+    };
+
+    void showTutor();
+    return () => {
+      cancelled = true;
+      warmupTimers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [src, previewId, preloadSources, onPreviewReady]);
+
+  return (
+    <div
+      ref={hostRef}
+      className={`vrm-avatar ${loaded ? 'vrm-ready' : ''} ${unavailable ? 'vrm-unavailable' : ''}`}
+      aria-label="Animated 3D tutor"
+    />
+  );
 }
