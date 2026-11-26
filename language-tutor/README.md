@@ -11,7 +11,7 @@ npm run dev
 
 ## Current prototype
 
-- Tutor selection cards for Korean, Spanish, Dutch, Japanese, and English.
+- Full-screen tutor picker with side arrows and keyboard navigation across five languages.
 - Level selection before a lesson.
 - A video-call-style Korean lesson room with captions, call controls, a learner goal, and a step-by-step lesson agenda.
 - Lesson checklist interaction to preview progress through the teaching plan.
