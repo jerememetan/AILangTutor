@@ -1,0 +1,145 @@
+.app-shell:has(.tutor-showcase) .topbar {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 2;
+  padding-inline: clamp(22px, 5vw, 88px);
+  background: transparent;
+  border: 0;
+  pointer-events: none;
+}
+
+.app-shell:has(.tutor-showcase) .topbar .brand { color: #fff8ee; pointer-events: auto; }
+.app-shell:has(.tutor-showcase) :is(.topnav, .profile-button) { display: none; }
+
+.tutor-showcase {
+  --shade: #211a16;
+  --type: #fff8ee;
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: flex-end;
+  min-height: 410px;
+  height: 100svh;
+  overflow: hidden;
+  color: var(--type);
+  background: #403933;
+}
+
+.showcase-amber { background: #654834; }
+.showcase-blue { background: #34484d; }
+.showcase-sage { background: #3b453a; }
+.showcase-lilac { background: #40333d; }
+
+.showcase-backdrop {
+  position: absolute;
+  z-index: -2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 58%;
+  filter: blur(1px) brightness(.86) saturate(.9);
+  transform: scale(1.02);
+}
+
+.showcase-backdrop-enter {
+  animation: showcase-backdrop-enter 260ms ease-out;
+}
+
+@keyframes showcase-backdrop-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.tutor-showcase::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background:
+    linear-gradient(180deg, #0c10118c, transparent 23%, transparent 64%, #101212e0),
+    radial-gradient(ellipse at 50% 47%, #fff2d419, transparent 42%, #1118174d 95%);
+}
+
+.showcase-stage { position: absolute; inset: 32px 0 76px; }
+.showcase-floor {
+  position: absolute;
+  left: 50%;
+  bottom: 4%;
+  width: min(47vw, 49vh);
+  height: 6%;
+  transform: translateX(-50%);
+  background: radial-gradient(ellipse, var(--shade), transparent 68%);
+  opacity: .55;
+  filter: blur(5px);
+}
+
+.showcase-stage > .avatar-placeholder {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  align-items: center;
+  background: none;
+}
+.showcase-stage .avatar-halo { display: none; }
+.showcase-stage .avatar-head { scale: 4; visibility: hidden; }
+.showcase-stage .avatar-placeholder:has(.vrm-unavailable) > .avatar-head { visibility: visible; }
+.avatar-placeholder:has(.vrm-ready) > .avatar-head { visibility: hidden; }
+.showcase-loading {
+  position: absolute;
+  top: 30px;
+  right: clamp(22px, 5vw, 88px);
+  font-size: 13px;
+}
+
+.showcase-switch {
+  position: absolute;
+  top: 48%;
+  transform: translateY(-50%);
+  width: clamp(46px, 4.5vw, 68px);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.showcase-switch svg { width: 45%; height: 45%; stroke-width: 1.4; }
+.showcase-switch[aria-disabled='true'] { cursor: wait; }
+.showcase-previous { left: clamp(14px, 5vw, 88px); }
+.showcase-next { right: clamp(14px, 5vw, 88px); }
+.showcase-select { position: relative; padding: 10px 20px; }
+
+.showcase-footer {
+  width: 100%;
+  z-index: 1;
+  margin: 0 clamp(22px, 5vw, 88px);
+  padding: 20px 0 max(24px, env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid color-mix(in srgb, var(--type) 25%, transparent);
+}
+.showcase-footer h1 {
+  margin: 0;
+  color: inherit;
+  font: 500 clamp(27px, 3.8vw, 66px)/1.1 Manrope, sans-serif;
+  letter-spacing: -.055em;
+}
+.showcase-footer h1 span { font-weight: 400; font-size: .62em; letter-spacing: -.035em; white-space: nowrap; }
+
+@media (max-width: 600px) {
+  .showcase-stage { inset: 50px 0 146px; }
+  .showcase-stage .avatar-head { scale: 2.3; }
+  .showcase-footer { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .showcase-footer h1 { font-size: clamp(27px, 7.5vw, 42px); }
+  .showcase-switch { top: 44%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .showcase-backdrop-enter { animation: none; }
+  .showcase-stage .avatar-head { animation: none; }
+  .tutor-picker-glow,
+  .tutor-picker-glow:hover,
+  .tutor-picker-glow:active { transition: none; }
+  .tutor-picker-glow:hover::before { animation: none; }
+}
