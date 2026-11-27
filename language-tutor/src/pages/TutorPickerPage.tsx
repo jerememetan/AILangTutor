@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import PickerRotationControl from '../components/PickerRotationControl';
 import TutorAvatar from '../components/TutorAvatar';
 import { tutorBackdrops } from '../data/tutorBackdrops';
 import { tutors } from '../data/tutors';
@@ -14,6 +15,7 @@ export default function TutorPickerPage() {
   const [preview, setPreview] = useState<{ id?: string; previousId?: string }>({});
   const visibleTutorId = preview.id;
   const stageRef = useRef<HTMLDivElement>(null);
+  const pickerRotation = useRef(0);
   const switchInProgress = useRef(false);
   const [isSwitching, setIsSwitching] = useState(false);
   const showPreview = useCallback((id: string) => {
@@ -97,14 +99,18 @@ export default function TutorPickerPage() {
           alt=""
         />
       )}
-      <div ref={stageRef} className="showcase-stage" aria-hidden="true">
-        <div className="showcase-floor" />
-        <TutorAvatar
-          tutor={tutor}
-          showcase
-          preloadSources={preloadSources}
-          onPreviewReady={showPreview}
-        />
+      <div ref={stageRef} className="showcase-stage">
+        <div className="showcase-floor" aria-hidden="true" />
+        <div className="showcase-model" aria-hidden="true">
+          <TutorAvatar
+            tutor={tutor}
+            showcase
+            preloadSources={preloadSources}
+            onPreviewReady={showPreview}
+            pickerRotation={pickerRotation}
+          />
+        </div>
+        <PickerRotationControl key={visibleTutor.id} rotation={pickerRotation} disabled={busy} />
       </div>
       <div className="showcase-loading" role="status">
         {visibleTutorId !== tutor.id && `Loading ${tutor.name}…`}

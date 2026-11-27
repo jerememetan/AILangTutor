@@ -1,3 +1,4 @@
+import type { RefObject } from 'react';
 import type { Tutor } from '../data/tutors';
 import VrmAvatar from './VrmAvatar';
 
@@ -7,6 +8,7 @@ type TutorAvatarProps = {
   showcase?: boolean;
   preloadSources?: string[];
   onPreviewReady?: (id: string) => void;
+  pickerRotation?: RefObject<number>;
 };
 
 export default function TutorAvatar({
@@ -15,6 +17,7 @@ export default function TutorAvatar({
   showcase = false,
   preloadSources,
   onPreviewReady,
+  pickerRotation,
 }: TutorAvatarProps) {
   return (
     <div
@@ -39,6 +42,7 @@ export default function TutorAvatar({
           previewId={showcase ? tutor.id : undefined}
           preloadSources={preloadSources}
           onPreviewReady={onPreviewReady}
+          pickerRotation={pickerRotation}
         />
       )}
       {large && (

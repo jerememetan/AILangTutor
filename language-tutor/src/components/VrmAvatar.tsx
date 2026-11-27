@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import * as THREE from 'three';
 import { VRMUtils } from '@pixiv/three-vrm';
 import type { VRM } from '@pixiv/three-vrm';
@@ -14,6 +14,7 @@ type VrmAvatarProps = {
   previewId?: string;
   preloadSources?: string[];
   onPreviewReady?: (id: string) => void;
+  pickerRotation?: RefObject<number>;
   speaking?: boolean;
 };
 
@@ -23,6 +24,7 @@ export default function VrmAvatar({
   previewId,
   preloadSources = noPreloads,
   onPreviewReady,
+  pickerRotation,
   speaking = false,
 }: VrmAvatarProps) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -126,7 +128,9 @@ export default function VrmAvatar({
       const frameDelta = clock.getDelta();
       const delta = inPicker ? Math.min(frameDelta, 0.05) : frameDelta;
       elapsed += delta;
-      subject.rotation.y = inPicker ? baseAngle : Math.sin(elapsed * radiansPerSecond) * swayAngle;
+      subject.rotation.y = inPicker
+        ? baseAngle + (pickerRotation?.current ?? 0)
+        : Math.sin(elapsed * radiansPerSecond) * swayAngle;
       const model = viewer.current?.model;
       pickerElapsed = model === lastModel && !reducedMotion.matches ? pickerElapsed + delta : 0;
       lastModel = model;
@@ -147,7 +151,7 @@ export default function VrmAvatar({
       renderer.forceContextLoss();
       renderer.domElement.remove();
     };
-  }, [inPicker]);
+  }, [inPicker, pickerRotation]);
 
   useEffect(() => {
     const state = viewer.current;
@@ -174,7 +178,11 @@ export default function VrmAvatar({
         if (inPicker) model.updateMotion(0, 0, speakingRef.current);
       }
       if (state.fallback) subject.add(state.fallback);
-      if (previewId) state.draw();
+      if (previewId) {
+        if (pickerRotation) pickerRotation.current = 0;
+        subject.rotation.y = THREE.MathUtils.degToRad(avatarMotionSettings.stageTurn.pickerAngleDegrees);
+        state.draw();
+      }
       setLoaded(Boolean(model || state.fallback));
       if (previewId) onPreviewReady?.(previewId);
 
@@ -196,7 +204,7 @@ export default function VrmAvatar({
       cancelled = true;
       warmupTimers.forEach((timer) => window.clearTimeout(timer));
     };
-  }, [src, previewId, preloadSources, onPreviewReady, inPicker]);
+  }, [src, previewId, preloadSources, onPreviewReady, inPicker, pickerRotation]);
 
   return (
     <div
