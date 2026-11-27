@@ -4,7 +4,7 @@ export default function Header() {
   return (
     <header className="topbar">
       <Link className="brand" to="/" aria-label="Go to tutor selection">
-        <span className="brand-mark">v.</span>
+        <img src='/favicon.png'></img>
         <span>verba</span>
       </Link>
       <nav className="topnav" aria-label="Main navigation">
