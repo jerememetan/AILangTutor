@@ -1,0 +1,81 @@
+.app-shell:has(:is(.tutor-showcase, .level-stage-page)) .topbar {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 2;
+  padding-inline: clamp(22px, 5vw, 88px);
+  background: transparent;
+  border: 0;
+  pointer-events: none;
+}
+
+.app-shell:has(:is(.tutor-showcase, .level-stage-page)) .topbar .brand { color: #fff8ee; pointer-events: auto; }
+.app-shell:has(:is(.tutor-showcase, .level-stage-page)) :is(.topnav, .profile-button) { display: none; }
+
+.showcase-amber { --showcase-color: #654834; }
+.showcase-blue { --showcase-color: #34484d; }
+.showcase-sage { --showcase-color: #3b453a; }
+.showcase-lilac { --showcase-color: #40333d; }
+
+.showcase-backdrop {
+  position: absolute;
+  z-index: -2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 58%;
+  filter: blur(1px) brightness(.86) saturate(.9);
+  transform: scale(1.02);
+}
+
+.showcase-floor {
+  position: absolute;
+  left: 50%;
+  bottom: 4%;
+  width: min(47vw, 49vh);
+  height: 6%;
+  transform: translateX(-50%);
+  background: radial-gradient(ellipse, var(--shade), transparent 68%);
+  opacity: .55;
+  filter: blur(5px);
+}
+
+.showcase-model { position: absolute; inset: 0; }
+.showcase-model > .avatar-placeholder {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  align-items: center;
+  background: none;
+}
+:is(.showcase-stage, .level-stage) .avatar-halo { display: none; }
+:is(.showcase-stage, .level-stage) .avatar-head { scale: 4; visibility: hidden; }
+:is(.showcase-stage, .level-stage) .avatar-placeholder:has(.vrm-unavailable) > .avatar-head { visibility: visible; }
+.avatar-placeholder:has(.vrm-ready) > .avatar-head { visibility: hidden; }
+.showcase-rotate {
+  position: absolute;
+  inset: 0 max(64px, calc((100% - 64vh) / 2));
+  cursor: grab;
+  touch-action: pan-y pinch-zoom;
+  user-select: none;
+}
+.showcase-rotate:active { cursor: grabbing; }
+.showcase-rotate[aria-disabled='true'] { cursor: wait; }
+.showcase-rotate:focus-visible { outline: 2px solid var(--type); outline-offset: -2px; }
+:is(.showcase-stage, .level-stage):has(.vrm-unavailable) .showcase-rotate { display: none; }
+.showcase-rotate span {
+  position: absolute;
+  bottom: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--type);
+  font-size: 11px;
+  white-space: nowrap;
+  text-shadow: 0 1px 4px #111;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is(.showcase-stage, .level-stage) .avatar-head { animation: none; }
+}

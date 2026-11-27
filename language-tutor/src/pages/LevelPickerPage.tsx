@@ -1,67 +1,82 @@
-import { Link, useSearchParams, useOutletContext } from 'react-router';
-import { ArrowLeft, ArrowRight, CircleHelp } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
+import { Link, useOutletContext, useSearchParams } from 'react-router';
+import { ArrowLeft, ArrowRight } from 'lucide-react';
+import PickerRotationControl from '../components/PickerRotationControl';
 import TutorAvatar from '../components/TutorAvatar';
 import { getLevel, levels } from '../data/levels';
+import { tutorBackdrops } from '../data/tutorBackdrops';
 import type { Tutor } from '../data/tutors';
+import '../components/TutorStage.css';
+import './TutorSelectButton.css';
+import './LevelPickerPage.css';
 
 export default function LevelPickerPage() {
   const tutor = useOutletContext<Tutor>();
   const [searchParams, setSearchParams] = useSearchParams();
   const level = getLevel(searchParams.get('level'));
+  const backdrop = tutorBackdrops[tutor.id];
+  const rotation = useRef(0);
+  const [previewReady, setPreviewReady] = useState(false);
+  const markPreviewReady = useCallback(() => setPreviewReady(true), []);
 
   return (
-    <main className="page level-page">
-      <Link className="back-button" to="/">
-        <ArrowLeft size={16} /> All tutors
+    <main className={`level-stage-page showcase-${tutor.tone}`}>
+      {backdrop && <img className="showcase-backdrop" src={backdrop} alt="" />}
+      <Link className="level-back" to={`/?tutor=${tutor.id}`}>
+        <ArrowLeft size={17} aria-hidden="true" /> All tutors
       </Link>
-      <div className="level-layout">
-        <section className="level-copy">
-          <div className="eyebrow">
-            <span className="eyebrow-dot" /> LET'S PERSONALISE YOUR LESSON
+
+      <div className="level-stage-layout">
+        <div className="level-stage">
+          <div className="level-avatar">
+            <div className="showcase-floor" aria-hidden="true" />
+            <div className="showcase-model" aria-hidden="true">
+              <TutorAvatar
+                tutor={tutor}
+                showcase
+                pickerRotation={rotation}
+                onPreviewReady={markPreviewReady}
+              />
+            </div>
+            <PickerRotationControl rotation={rotation} disabled={!previewReady} showHint />
           </div>
-          <h1>
-            Where are you
-            <br />
-            with {tutor.language}?
-          </h1>
-          <p className="page-subtitle">
-            This helps {tutor.name} choose the right starting point. You can change it anytime.
+          <p className="level-tutor-name">
+            {tutor.name} <span>— {tutor.language}</span>
           </p>
-          <div className="level-options">
-            {levels.map((option, index) => (
-              <button
-                key={option.id}
-                className={`level-option ${level.id === option.id ? 'selected' : ''}`}
-                aria-pressed={level.id === option.id}
-                onClick={() => setSearchParams({ level: option.id }, { replace: true })}
-              >
-                <span className="level-index">0{index + 1}</span>
-                <span className="level-copy-text">
-                  <b>{option.title}</b>
-                  <small>{option.detail}</small>
+        </div>
+
+        <section className="level-panel" aria-labelledby="level-heading">
+          <h1 id="level-heading">Choose your level</h1>
+          <p className="level-question" id="level-question">
+            How comfortable are you speaking {tutor.language}?
+          </p>
+
+          <fieldset className="level-choices" aria-labelledby="level-question">
+            {levels.map((option) => (
+              <label className="level-choice" key={option.id}>
+                <input
+                  type="radio"
+                  name="tutor-level"
+                  value={option.id}
+                  checked={level.id === option.id}
+                  onChange={() => setSearchParams({ level: option.id }, { replace: true })}
+                />
+                <span className="level-choice-indicator" aria-hidden="true" />
+                <span className="level-choice-text">
+                  <strong>{option.title}</strong>
+                  <span>{option.detail}</span>
                 </span>
-                <span className="radio-dot">{level.id === option.id && <span />}</span>
-              </button>
+              </label>
             ))}
-          </div>
-          <Link className="primary-button" to={`/tutors/${tutor.id}/lesson?level=${level.id}`}>
-            Meet {tutor.name} <ArrowRight size={17} />
+          </fieldset>
+
+          <Link
+            className="level-start tutor-picker-glow"
+            to={`/tutors/${tutor.id}/lesson?level=${level.id}`}
+          >
+            Start lesson <ArrowRight size={18} aria-hidden="true" />
           </Link>
-          <p className="privacy-note">
-            <CircleHelp size={14} /> No test. Your tutor will adjust as you practise.
-          </p>
         </section>
-        <aside className="tutor-intro-card">
-          <div className="intro-card-top">
-            <span className="online-dot" /> YOUR TUTOR
-          </div>
-          <TutorAvatar tutor={tutor} large />
-          <div className="intro-name">{tutor.name}</div>
-          <div className="intro-language">
-            {tutor.flag} &nbsp; {tutor.language}
-          </div>
-          <div className="intro-quote">“We’ll take it one conversation at a time.”</div>
-        </aside>
       </div>
     </main>
   );

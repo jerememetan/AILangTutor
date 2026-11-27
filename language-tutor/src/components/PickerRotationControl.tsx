@@ -7,9 +7,14 @@ const keyboardStep = Math.PI / 12;
 type PickerRotationControlProps = {
   rotation: RefObject<number>;
   disabled: boolean;
+  showHint?: boolean;
 };
 
-export default function PickerRotationControl({ rotation, disabled }: PickerRotationControlProps) {
+export default function PickerRotationControl({
+  rotation,
+  disabled,
+  showHint = false,
+}: PickerRotationControlProps) {
   const drag = useRef<{ pointerId: number; lastX: number } | null>(null);
 
   function rotateBy(delta: number) {
@@ -51,6 +56,7 @@ export default function PickerRotationControl({ rotation, disabled }: PickerRota
         else rotateBy(event.key === 'ArrowLeft' ? -keyboardStep : keyboardStep);
       }}
     >
+      {showHint && !disabled}
     </div>
   );
 }

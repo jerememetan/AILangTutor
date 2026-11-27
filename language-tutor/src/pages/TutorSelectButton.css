@@ -63,3 +63,10 @@
   box-shadow: 0 0 0 0 transparent;
   transition: box-shadow 0.2s ease-in;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .tutor-picker-glow,
+  .tutor-picker-glow:hover,
+  .tutor-picker-glow:active { transition: none; }
+  .tutor-picker-glow:hover::before { animation: none; }
+}

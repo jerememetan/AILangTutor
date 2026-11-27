@@ -5,6 +5,7 @@ import PickerRotationControl from '../components/PickerRotationControl';
 import TutorAvatar from '../components/TutorAvatar';
 import { tutorBackdrops } from '../data/tutorBackdrops';
 import { tutors } from '../data/tutors';
+import '../components/TutorStage.css';
 import './TutorSelectButton.css';
 import './TutorPickerPage.css';
 
