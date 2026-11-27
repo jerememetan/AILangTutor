@@ -62,7 +62,7 @@ export default function VrmAvatar({
     const warmed = new WeakSet<VRM>();
     const state = {
       subject,
-      cache: createVrmModelCache(),
+      cache: createVrmModelCache(inPicker),
       draw: () => renderer.render(scene, camera),
       prepare: warmupTarget
         ? (avatar: VRM) => {
@@ -114,16 +114,23 @@ export default function VrmAvatar({
 
     const clock = new THREE.Clock();
     let elapsed = 0;
+    let pickerElapsed = 0;
+    let lastModel: LoadedVrm | undefined;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const { pickerAngleDegrees, amplitudeDegrees, periodSeconds } = avatarMotionSettings.stageTurn;
     const baseAngle = inPicker ? THREE.MathUtils.degToRad(pickerAngleDegrees) : 0;
     const swayAngle = THREE.MathUtils.degToRad(amplitudeDegrees);
     const radiansPerSecond = periodSeconds > 0 ? (2 * Math.PI) / periodSeconds : 0;
     const render = () => {
       frameId = window.requestAnimationFrame(render);
-      const delta = clock.getDelta();
+      const frameDelta = clock.getDelta();
+      const delta = inPicker ? Math.min(frameDelta, 0.05) : frameDelta;
       elapsed += delta;
-      subject.rotation.y = baseAngle + Math.sin(elapsed * radiansPerSecond) * swayAngle;
-      viewer.current?.model?.updateMotion(elapsed, delta, speakingRef.current);
+      subject.rotation.y = inPicker ? baseAngle : Math.sin(elapsed * radiansPerSecond) * swayAngle;
+      const model = viewer.current?.model;
+      pickerElapsed = model === lastModel && !reducedMotion.matches ? pickerElapsed + delta : 0;
+      lastModel = model;
+      model?.updateMotion(inPicker ? pickerElapsed : elapsed, delta, speakingRef.current);
       state.draw();
     };
     render();
@@ -162,7 +169,10 @@ export default function VrmAvatar({
       state.fallback = model || !previewId ? undefined : createPreviewFigure(previewId);
       state.model = model;
       state.source = model ? src : undefined;
-      if (model) subject.add(model.avatar.scene);
+      if (model) {
+        subject.add(model.avatar.scene);
+        if (inPicker) model.updateMotion(0, 0, speakingRef.current);
+      }
       if (state.fallback) subject.add(state.fallback);
       if (previewId) state.draw();
       setLoaded(Boolean(model || state.fallback));
@@ -186,7 +196,7 @@ export default function VrmAvatar({
       cancelled = true;
       warmupTimers.forEach((timer) => window.clearTimeout(timer));
     };
-  }, [src, previewId, preloadSources, onPreviewReady]);
+  }, [src, previewId, preloadSources, onPreviewReady, inPicker]);
 
   return (
     <div

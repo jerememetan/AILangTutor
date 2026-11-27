@@ -16,7 +16,7 @@ type CacheEntry = {
 
 // One cache per viewer. Keeping parsed models also preserves their textures
 // and geometry when a tutor leaves and then returns to the stage.
-export default function createVrmModelCache() {
+export default function createVrmModelCache(inPicker = false) {
   const loader = new GLTFLoader();
   loader.register((parser) => new VRMLoaderPlugin(parser));
   const entries = new Map<string, CacheEntry>();
@@ -42,7 +42,7 @@ export default function createVrmModelCache() {
     const center = bounds.getCenter(new Vector3());
     avatar.scene.scale.setScalar(scale);
     avatar.scene.position.set(-center.x * scale, -bounds.min.y * scale, -center.z * scale);
-    return { avatar, updateMotion: createVrmMotion(avatar) };
+    return { avatar, updateMotion: createVrmMotion(avatar, inPicker) };
   }
 
   function get(src: string) {
