@@ -3,8 +3,9 @@ import * as THREE from 'three';
 import { VRMUtils } from '@pixiv/three-vrm';
 import type { VRM } from '@pixiv/three-vrm';
 
+import { avatarMotionSettings } from '../data/avatarMotionSettings';
 import createPreviewFigure from './createPreviewFigure';
-import createVrmModelCache from './vrmModelCache';
+import createVrmModelCache, { type LoadedVrm } from './vrmModelCache';
 
 const noPreloads: string[] = [];
 
@@ -30,7 +31,7 @@ export default function VrmAvatar({
     cache: ReturnType<typeof createVrmModelCache>;
     prepare?: (avatar: VRM) => void;
     draw: () => void;
-    avatar?: VRM;
+    model?: LoadedVrm;
     source?: string;
     fallback?: THREE.Group;
   } | null>(null);
@@ -113,19 +114,16 @@ export default function VrmAvatar({
 
     const clock = new THREE.Clock();
     let elapsed = 0;
+    const { pickerAngleDegrees, amplitudeDegrees, periodSeconds } = avatarMotionSettings.stageTurn;
+    const baseAngle = inPicker ? THREE.MathUtils.degToRad(pickerAngleDegrees) : 0;
+    const swayAngle = THREE.MathUtils.degToRad(amplitudeDegrees);
+    const radiansPerSecond = periodSeconds > 0 ? (2 * Math.PI) / periodSeconds : 0;
     const render = () => {
       frameId = window.requestAnimationFrame(render);
       const delta = clock.getDelta();
       elapsed += delta;
-      subject.rotation.y = (inPicker ? -0.13 : 0) + Math.sin(elapsed * 0.35) * 0.045;
-      const avatar = viewer.current?.avatar;
-      if (avatar) {
-        avatar.update(delta);
-        avatar.expressionManager?.setValue(
-          'aa',
-          speakingRef.current ? 0.13 + Math.max(0, Math.sin(elapsed * 12)) * 0.32 : 0,
-        );
-      }
+      subject.rotation.y = baseAngle + Math.sin(elapsed * radiansPerSecond) * swayAngle;
+      viewer.current?.model?.updateMotion(elapsed, delta, speakingRef.current);
       state.draw();
     };
     render();
@@ -156,18 +154,18 @@ export default function VrmAvatar({
     cache.retain([state.source, src, ...preloadSources]);
 
     const showTutor = async () => {
-      const avatar = src ? await cache.get(src) : undefined;
+      const model = src ? await cache.get(src) : undefined;
       if (cancelled) return;
 
       subject.clear();
       if (state.fallback) VRMUtils.deepDispose(state.fallback);
-      state.fallback = avatar || !previewId ? undefined : createPreviewFigure(previewId);
-      state.avatar = avatar;
-      state.source = avatar ? src : undefined;
-      if (avatar) subject.add(avatar.scene);
+      state.fallback = model || !previewId ? undefined : createPreviewFigure(previewId);
+      state.model = model;
+      state.source = model ? src : undefined;
+      if (model) subject.add(model.avatar.scene);
       if (state.fallback) subject.add(state.fallback);
       if (previewId) state.draw();
-      setLoaded(Boolean(avatar || state.fallback));
+      setLoaded(Boolean(model || state.fallback));
       if (previewId) onPreviewReady?.(previewId);
 
       cache.retain([src, ...preloadSources]);
@@ -175,10 +173,10 @@ export default function VrmAvatar({
       for (const neighbor of preloadSources) {
         if (cancelled) break;
         const upcoming = await cache.get(neighbor);
-        if (!cancelled && upcoming && upcoming !== state.avatar) {
+        if (!cancelled && upcoming && upcoming !== state.model) {
           // Keep background GPU uploads outside the visible tutor reveal.
           const delay = Math.max(0, warmAfter - performance.now()) + warmupTimers.length * 32;
-          warmupTimers.push(window.setTimeout(() => state.prepare?.(upcoming), delay));
+          warmupTimers.push(window.setTimeout(() => state.prepare?.(upcoming.avatar), delay));
         }
       }
     };

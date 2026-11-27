@@ -2,9 +2,16 @@ import { Box3, Vector3 } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 
+import createVrmMotion from './createVrmMotion';
+
+export type LoadedVrm = {
+  avatar: VRM;
+  updateMotion: ReturnType<typeof createVrmMotion>;
+};
+
 type CacheEntry = {
   controller: AbortController;
-  model: Promise<VRM | undefined>;
+  model: Promise<LoadedVrm | undefined>;
 };
 
 // One cache per viewer. Keeping parsed models also preserves their textures
@@ -35,7 +42,7 @@ export default function createVrmModelCache() {
     const center = bounds.getCenter(new Vector3());
     avatar.scene.scale.setScalar(scale);
     avatar.scene.position.set(-center.x * scale, -bounds.min.y * scale, -center.z * scale);
-    return avatar;
+    return { avatar, updateMotion: createVrmMotion(avatar) };
   }
 
   function get(src: string) {
@@ -45,9 +52,9 @@ export default function createVrmModelCache() {
     const controller = new AbortController();
     const model = load(src, controller.signal)
       .catch(() => undefined)
-      .then((avatar) => {
-        if (!avatar && entries.get(src)?.controller === controller) entries.delete(src);
-        return avatar;
+      .then((model) => {
+        if (!model && entries.get(src)?.controller === controller) entries.delete(src);
+        return model;
       });
     entries.set(src, { controller, model });
     return model;
@@ -59,8 +66,8 @@ export default function createVrmModelCache() {
       if (retained.has(src)) continue;
       entries.delete(src);
       entry.controller.abort();
-      void entry.model.then((avatar) => {
-        if (avatar) VRMUtils.deepDispose(avatar.scene);
+      void entry.model.then((model) => {
+        if (model) VRMUtils.deepDispose(model.avatar.scene);
       });
     }
   }
