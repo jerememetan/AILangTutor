@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { emptyChatHistory, updateChatHistory } from './chatHistory';
 import { koreanTutorId } from './lesson-contract';
-import type { ChatMessage, ChallengeTurn, ChallengeView, GoalId, LevelId, OpenLesson, Recap, SessionView } from './lesson-contract';
+import type { ChallengeTurn, ChallengeView, GoalId, LevelId, OpenLesson, Recap, SessionView } from './lesson-contract';
 
 const endpoint = '/api/lesson/sessions';
 const turnTimeoutMs = 50_000;
@@ -52,7 +53,7 @@ export function useLessonSession(level: LevelId) {
   const [entryId, setEntryId] = useState(() => crypto.randomUUID());
   const [view, setView] = useState<SessionView | null>(null);
   const [recap, setRecap] = useState<Recap | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [history, setHistory] = useState(emptyChatHistory);
   const [challenge, setChallenge] = useState<ChallengeView | null>(null);
   const [challengeVisible, setChallengeVisible] = useState(false);
   const [pending, setPending] = useState(false);
@@ -65,9 +66,8 @@ export function useLessonSession(level: LevelId) {
   const retryAction = useRef<LessonAction | null>(null);
   const ended = useRef(false);
 
-  function updateMessages(next: ChatMessage[] | null | undefined) {
-    // An older lesson server may omit chat history. Keep the last available snapshot.
-    if (Array.isArray(next)) setMessages(next);
+  function updateMessages(view: SessionView | Exclude<ChallengeView, { status: 'ended' }>, askedForHint = false) {
+    setHistory((previous) => updateChatHistory(previous, view, askedForHint));
   }
 
   useEffect(() => {
@@ -97,7 +97,7 @@ export function useLessonSession(level: LevelId) {
         }
         id.current = opened.sessionId;
         setView(opened.view);
-        updateMessages(opened.view.messages);
+        updateMessages(opened.view);
       } catch (reason) {
         if (!controller.signal.aborted && !ended.current) {
           setError(timeout.aborted ? 'Lesson setup took too long. Try again.'
@@ -129,14 +129,14 @@ export function useLessonSession(level: LevelId) {
         const next = await readJson<SessionView>(response);
         if (!controller.signal.aborted && !ended.current) {
           setView(next);
-          updateMessages(next.messages);
+          updateMessages(next, !action.turn.audio);
         }
       } else {
         const next = await readJson<ChallengeView>(response);
         if (!controller.signal.aborted && !ended.current) {
           setChallenge(next);
           setChallengeVisible(next.status !== 'ended');
-          if (next.status !== 'ended') updateMessages(next.messages);
+          if (next.status !== 'ended') updateMessages(next);
         }
       }
       if (!controller.signal.aborted) setCanRecordAgain(false);
@@ -146,11 +146,11 @@ export function useLessonSession(level: LevelId) {
         const current = reason.currentView;
         if (action.type === 'lesson-turn' && 'agenda' in current) {
           setView(current);
-          updateMessages(current.messages);
+          updateMessages(current);
         } else if (action.type === 'challenge-turn' && 'status' in current) {
           setChallenge(current);
           setChallengeVisible(current.status !== 'ended');
-          if (current.status !== 'ended') updateMessages(current.messages);
+          if (current.status !== 'ended') updateMessages(current);
         }
         setCanRecordAgain(false);
         setError(reason.message);
@@ -204,7 +204,7 @@ export function useLessonSession(level: LevelId) {
   function restartLesson() {
     if (!roomExpired) return;
     setView(null);
-    setMessages([]);
+    setHistory(emptyChatHistory);
     setChallenge(null);
     setChallengeVisible(false);
     setRoomExpired(false);
@@ -243,7 +243,7 @@ export function useLessonSession(level: LevelId) {
   }
 
   return {
-    view, recap, messages, pending, error, failedAction, submit, end, challenge, challengeVisible,
+    view, recap, messages: history.messages, pending, error, failedAction, submit, end, challenge, challengeVisible,
     startChallenge, endChallenge, recordAgain, canRecordAgain, roomExpired, restartLesson,
     showChallengeResults: () => { if (challenge?.status === 'complete') setChallengeVisible(true); },
     backToLessonRecap: () => setChallengeVisible(false),
@@ -251,7 +251,7 @@ export function useLessonSession(level: LevelId) {
       if (retryAction.current) void send(retryAction.current);
       else if (!id.current && !ended.current) {
         setError('');
-        setMessages([]);
+        setHistory(emptyChatHistory);
         setEntryId(crypto.randomUUID());
       }
     },
