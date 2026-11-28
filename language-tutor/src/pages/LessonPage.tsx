@@ -49,7 +49,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
   const activePrompt = agenda?.goals.find((goal) => goal.id === activeGoal)?.practice;
   const holding = mic.status === 'starting' || mic.status === 'recording';
   const capturing = holding || mic.status === 'finishing';
-  const ready = canCapture && !recap && !pending && !session.failedAction && !speaking && !loadingAudio;
+  const ready = canCapture && !recap && !pending && !session.failedAction && !session.roomExpired && !speaking && !loadingAudio;
   const progress: Recap = recap ?? view ?? { completed: [], helpByGoal: {} };
   const finished = Boolean(view && !activeGoal);
   const reply = challenge?.reply ?? lessonMedia?.reply;
@@ -60,6 +60,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
     : session.failedAction === 'challenge-end' ? 'Retry closing challenge'
     : session.failedAction ? 'Retry turn' : 'Retry lesson setup';
   const state = recap ? 'Lesson ended'
+    : session.roomExpired ? 'Lesson unavailable'
     : speaking ? 'Jiwon is speaking'
     : holding ? mic.status === 'starting' ? 'Opening microphone…' : 'Recording · release to send'
     : pending && finished && !session.challenge ? 'Preparing the challenge…'
@@ -109,7 +110,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           {!pending && !capturing && !session.error && transcript !== undefined && (
             <p className="lesson-transcript" aria-live="polite">
               <strong>I heard</strong> {transcript
-                ? <q lang={/\p{Script=Hangul}/u.test(transcript) ? 'ko' : 'en'} dir="auto">{transcript}</q>
+                ? <q lang={/\p{Script=Hangul}/u.test(transcript) ? 'ko' : undefined} dir="auto">{transcript}</q>
                 : <span>No words detected</span>}
             </p>
           )}
@@ -179,6 +180,12 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
                   {retryLabel}
                 </button>
               )}
+              {session.canRecordAgain && (
+                <button type="button" className="lesson-secondary" onClick={session.recordAgain}>Record again</button>
+              )}
+              {session.roomExpired && (
+                <button type="button" className="lesson-secondary" onClick={session.restartLesson}>Start a new lesson</button>
+              )}
             </div>
           )}
         </section>
@@ -212,7 +219,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
               {finished && !recap && <p>{view?.reply.prompt}</p>}
               <div className="lesson-recap-actions">
                 {finished && !recap && !session.challenge && (
-                  <button type="button" className="lesson-secondary" disabled={pending || Boolean(session.failedAction)}
+                  <button type="button" className="lesson-secondary" disabled={pending || Boolean(session.failedAction) || session.roomExpired}
                     onClick={session.startChallenge}>{pending ? 'Preparing challenge…' : 'Try a speaking challenge'}</button>
                 )}
                 {finished && !recap && session.challenge?.status === 'complete' && (
