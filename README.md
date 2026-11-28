@@ -1,0 +1,37 @@
+# Verba
+
+Verba is a speaking-first language tutor built for an AI voice hackathon. Pick a tutor, choose your level, and practise in a one-on-one call with a 3D avatar. The idea grew out of wanting to practise Korean before an exchange in Korea.
+
+## Tutor picker demo
+
+![Verba’s tutor picker switching between Han Jiwon and Victoria Navarro](docs/media/verba-tutor-picker.gif)
+
+[Watch the full video](docs/media/verba-tutor-picker.mp4)
+
+## What you can try
+
+The playable lesson is a first meeting in Korean with Han Jiwon. Each call generates a new speaking agenda. **New to it** starts with two short goals, **Know a little** gets three conversational goals, and **Comfortable speaking** gets four more challenging goals.
+
+Hold **Push to speak**, answer in Korean or ask for help in English, then release to send. Jiwon can explain a phrase and give you another try. A goal checks off when your answer demonstrates it. The call ends with a recap of what you practised. Four other tutors are available to preview in the character picker.
+
+## Run locally
+
+Use Node.js 22.20 or newer. From the repository root, run the following in PowerShell.
+
+```powershell
+cd language-tutor
+npm ci
+if (-not (Test-Path .env.lesson.local)) { Copy-Item .env.example .env.lesson.local }
+```
+
+Set `INWORLD_API_KEY` in `language-tutor/.env.lesson.local` to your Inworld Base64 API key with Realtime access. From `language-tutor/`, run `npm run dev:lesson` and `npm run dev` in separate terminals.
+
+Open the URL printed by Vite and choose **Han Jiwon → New to it → Start lesson**. Turn on the mic and allow browser access. If playback is blocked, select **Play tutor audio**.
+
+## How it works
+
+React, TypeScript, and Vite run the app. Three.js renders the VRM tutor and animates her mouth from the audio the browser plays. A Node.js server uses Inworld Realtime for transcription, model-powered lesson planning and assessment, and streamed tutor speech.
+
+From `language-tutor/`, run `npm run test:lesson` for the lesson tests with simulated Inworld responses and `npm run build` for the TypeScript check and production bundle.
+
+See the [app README](language-tutor/README.md) for the demo walkthrough and the [avatar notes](language-tutor/public/avatars/README.md) for model setup.
