@@ -175,8 +175,14 @@ type ClientEvent = {
     audio: { input: { turn_detection: unknown }; output?: unknown };
     providerData: { auto_tool_response: boolean };
   };
-  response?: { metadata: Record<string, string>; tool_choice: string; instructions: string; tools: { name: string }[] };
-  item?: { call_id: string };
+  response?: {
+    metadata: Record<string, string>;
+    tool_choice?: string;
+    instructions: string;
+    tools?: { name: string }[];
+    max_output_tokens: number;
+  };
+  item?: { type: string; call_id?: string; role?: string; content?: { type: string; text: string }[] };
   audio?: string;
 };
 
@@ -209,7 +215,7 @@ function sendTranscript(socket: FakeInworldSocket, text: string) {
 }
 
 function sendToolResult(socket: FakeInworldSocket, request: ClientEvent, result: object) {
-  const name = request.response?.tools[0].name;
+  const name = request.response?.tools?.[0].name;
   const response = { id: name, metadata: request.response?.metadata };
   socket.emit({ type: 'response.created', response });
   socket.emit({
@@ -221,6 +227,67 @@ function sendToolResult(socket: FakeInworldSocket, request: ClientEvent, result:
 
 const pcmClip = new Blob([new Uint8Array(minPcmBytes)], { type: pcmAudioType });
 
+test('plans and assesses via validated text when the Inworld account restricts tools', async () => {
+  let connections = 0;
+  let toolRequests = 0;
+  const provider = createRealtimeProvider({ INWORLD_API_KEY: 'fake' }, () => {
+    connections++;
+    return new FakeInworldSocket((socket, event) => {
+      if (event.type === 'session.update') socket.emit({ type: 'session.updated' });
+      if (event.type === 'input_audio_buffer.commit') sendTranscript(socket, clips.greeting);
+      if (event.type !== 'response.create' || !event.response) return;
+      assert.ok(event.response.max_output_tokens <= 1000);
+      if (event.response.tools) {
+        toolRequests++;
+        socket.emit({ type: 'error', error: { message: 'Tool calling is currently restricted on your plan.' } });
+        return;
+      }
+      assert.equal(event.response.tool_choice, undefined);
+      assert.match(event.response.instructions, /one compact JSON object/);
+      const output = event.response.instructions.includes('Write a brief English welcome')
+        ? modelAgenda('beginner')
+        : demonstrated(clips.greeting);
+      const response = { id: 'text-response', metadata: event.response.metadata };
+      socket.emit({ type: 'response.created', response });
+      socket.emit({ type: 'response.output_text.done', response_id: 'old-response', text: 'unrelated' });
+      socket.emit({ type: 'response.output_text.done', response_id: response.id, text: JSON.stringify(output) });
+      socket.emit({ type: 'response.done', response: { ...response, status: 'completed' } });
+    }) as unknown as WebSocket;
+  });
+  const handler = createLessonHandler(provider, fixtureVoice);
+  const session = await enter(handler);
+  assert.equal(session.view.agenda.goals.length, 2);
+  const answer = await handler(turn(session, 'goal-1', clips.greeting));
+  assert.equal(answer.status, 200);
+  assert.equal((await answer.json() as SessionView).activeGoal, 'goal-2');
+  assert.equal(connections, 2);
+  assert.equal(toolRequests, 1);
+});
+
+test('lesson setup logs the Inworld stage and codes without exposing provider payloads', async (t) => {
+  const warnings = t.mock.method(console, 'warn', () => {});
+  const provider = createRealtimeProvider({ INWORLD_API_KEY: 'fake' }, () =>
+    new FakeInworldSocket((socket, event) => {
+      if (event.type === 'session.update') {
+        socket.emit({ type: 'error', error: {
+          type: 'invalid_request_error',
+          code: 'invalid_value',
+          param: 'session.model',
+          message: 'private response payload',
+        } });
+      }
+    }) as unknown as WebSocket);
+  const handler = createLessonHandler(provider, fixtureVoice);
+  const response = await handler(entryRequest('beginner'));
+  assert.equal(response.status, 502);
+  const body = await response.text();
+  assert.match(body, /prepare your speaking goals/);
+  assert.doesNotMatch(body, /invalid_value|private response payload/);
+  assert.equal(warnings.mock.callCount(), 1);
+  assert.match(String(warnings.mock.calls[0].arguments[0]), /session configuration.*invalid_value.*session\.model/);
+  assert.doesNotMatch(String(warnings.mock.calls[0].arguments[0]), /private response payload/);
+});
+
 test('the same Inworld room plans a lesson and a challenge and assesses the latest speech', async () => {
   const controller = new AbortController();
   let connections = 0;
@@ -231,7 +298,7 @@ test('the same Inworld room plans a lesson and a challenge and assesses the late
       if (event.type === 'session.update') socket.emit({ type: 'session.updated' });
       if (event.type === 'input_audio_buffer.commit') sendTranscript(socket, '안녕하십니까');
       if (event.type !== 'response.create') return;
-      const name = event.response?.tools[0].name ?? '';
+      const name = event.response?.tools?.[0].name ?? '';
       calls.push(name);
       if (name === 'plan_speaking_lesson') sendToolResult(socket, event, modelAgenda('beginner'));
       if (name === 'plan_speaking_challenge') {
@@ -379,6 +446,7 @@ test('Inworld checks spoken evidence while ElevenLabs streams the welcome early 
   let connections = 0;
   let synthesizedReplies = 0;
   let plans = 0;
+  let receivedOpeningMessage = false;
   let transcriptionCount = 0;
   let closed: FakeInworldSocket | undefined;
   let finishAudio: () => void = () => assert.fail('Tutor audio has not started.');
@@ -428,7 +496,8 @@ test('Inworld checks spoken evidence while ElevenLabs streams the welcome early 
           break;
         case 'response.create':
           assert.equal(event.response?.tool_choice, 'required');
-          if (event.response?.tools[0].name === 'plan_speaking_lesson') {
+          if (event.response?.tools?.[0].name === 'plan_speaking_lesson') {
+            assert.ok(receivedOpeningMessage, 'The first response needs a user message in the conversation.');
             plans++;
             assert.match(event.response.instructions, /beginner.*exactly 2/);
             sendToolResult(socket, event, modelAgenda('beginner'));
@@ -438,7 +507,14 @@ test('Inworld checks spoken evidence while ElevenLabs streams the welcome early 
           }
           break;
         case 'conversation.item.create':
-          assert.match(event.item?.call_id ?? '', /^call-(assess_speaking_goal|plan_speaking_lesson)$/);
+          if (event.item?.type === 'message') {
+            assert.equal(plans, 0);
+            assert.equal(event.item.role, 'user');
+            assert.deepEqual(event.item.content, [{ type: 'input_text', text: 'Prepare my Korean speaking lesson.' }]);
+            receivedOpeningMessage = true;
+          } else {
+            assert.match(event.item?.call_id ?? '', /^call-(assess_speaking_goal|plan_speaking_lesson)$/);
+          }
           break;
         default:
           assert.fail(`Unexpected event ${event.type}`);
@@ -485,7 +561,7 @@ test('Realtime reconnects on a retry after the socket drops during transcription
         else sendTranscript(socket, clips.greeting);
       }
       if (event.type === 'response.create') {
-        const isPlan = event.response?.tools[0].name === 'plan_speaking_lesson';
+        const isPlan = event.response?.tools?.[0].name === 'plan_speaking_lesson';
         sendToolResult(socket, event, isPlan ? modelAgenda('beginner') : demonstrated(clips.greeting));
       }
     }) as unknown as WebSocket;

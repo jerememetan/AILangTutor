@@ -17,15 +17,23 @@ type TurnContext = {
   previousReply: TutorReply;
   priorHelp?: string;
 };
+type RealtimeErrorDetails = { type?: string; code?: string | number; param?: string; message?: string };
 type RealtimeEvent = {
   type: string;
   item_id?: string;
   transcript?: string;
   response_id?: string;
-  response?: { id: string; status: string; metadata?: Record<string, string> };
+  response?: {
+    id: string;
+    status: string;
+    metadata?: Record<string, string>;
+    status_details?: { reason?: string; error?: RealtimeErrorDetails };
+  };
+  error?: RealtimeErrorDetails;
   name?: string;
   arguments?: string;
   call_id?: string;
+  text?: string;
 };
 
 type ConnectSocket = (url: string, headers: Record<string, string>) => WebSocket;
@@ -74,6 +82,23 @@ export type RealtimeProvider = {
   room(signal: AbortSignal): RealtimeRoom;
 };
 
+export class InworldRealtimeError extends Error {
+  constructor(stage: string, detail: string) {
+    super('Inworld Realtime failed during ' + stage + ' (' + detail + ').');
+  }
+}
+
+class ToolCallingRestrictedError extends InworldRealtimeError {}
+
+function toolCallingRestricted(error: RealtimeErrorDetails | undefined) {
+  return typeof error?.message === 'string' && /tool calling is currently restricted on your plan/i.test(error.message);
+}
+
+function diagnosticCode(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 9999) return String(value);
+  if (typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,48}$/.test(value)) return value;
+}
+
 function send(socket: WebSocket, event: object) {
   socket.send(JSON.stringify(event));
 }
@@ -81,6 +106,7 @@ function send(socket: WebSocket, event: object) {
 function exchange<T>(
   socket: WebSocket,
   signal: AbortSignal,
+  stage: string,
   receive: (event: RealtimeEvent) => T | undefined,
   start?: () => void,
 ): Promise<T> {
@@ -89,16 +115,30 @@ function exchange<T>(
     const listeners = new AbortController();
     const finish = () => listeners.abort();
     const fail = (error: unknown) => { finish(); reject(error); };
-    const disconnect = () => fail(new Error('Inworld Realtime disconnected.'));
     const options = { signal: listeners.signal };
-    socket.addEventListener('error', disconnect, options);
-    socket.addEventListener('close', disconnect, options);
-    deadline.addEventListener('abort', () => fail(deadline.reason), options);
+    socket.addEventListener('error', (event) => {
+      const { error } = event as ErrorEvent;
+      const code = diagnosticCode(error?.cause?.code ?? error?.code);
+      fail(new InworldRealtimeError(stage, code ? 'WebSocket error ' + code : 'WebSocket error'));
+    }, options);
+    socket.addEventListener('close', (event) => {
+      const code = diagnosticCode(event.code);
+      fail(new InworldRealtimeError(stage, code ? 'WebSocket closed with code ' + code : 'WebSocket closed'));
+    }, options);
+    deadline.addEventListener('abort', () => {
+      fail(signal.aborted ? signal.reason : new InworldRealtimeError(stage, 'timed out waiting for Inworld'));
+    }, options);
     socket.addEventListener('message', (message: MessageEvent) => {
       try {
         if (typeof message.data !== 'string') return;
         const event = JSON.parse(message.data) as RealtimeEvent;
-        if (event.type === 'error') throw new Error('Inworld Realtime rejected the request.');
+        if (event.type === 'error') {
+          if (toolCallingRestricted(event.error)) {
+            throw new ToolCallingRestrictedError(stage, 'tool calling is restricted');
+          }
+          const details = [event.error?.type, event.error?.code, event.error?.param].map(diagnosticCode).filter(Boolean);
+          throw new InworldRealtimeError(stage, ['request rejected', ...details].join(', '));
+        }
         const result = receive(event);
         if (result !== undefined) { finish(); resolve(result); }
       } catch (error) {
@@ -116,7 +156,7 @@ function exchange<T>(
 
 function transcribe(socket: WebSocket, signal: AbortSignal, audio: Uint8Array) {
   let committedId: string | undefined;
-  return exchange(socket, signal, (event) => {
+  return exchange(socket, signal, 'speech transcription', (event) => {
     if (event.type === 'input_audio_buffer.committed') committedId = event.item_id;
     if (!committedId || event.item_id !== committedId) return;
     if (event.type === 'conversation.item.input_audio_transcription.failed') {
@@ -134,52 +174,75 @@ function transcribe(socket: WebSocket, signal: AbortSignal, audio: Uint8Array) {
   });
 }
 
-async function requestTool<T>(
-  socket: WebSocket, signal: AbortSignal, tool: FunctionTool,
+async function requestStructured<T>(
+  socket: WebSocket, signal: AbortSignal, tool: FunctionTool, useTools: boolean,
   instructions: string, maxTokens: number, parse: (output: string) => T,
 ) {
   const requestId = randomUUID();
+  const stage = tool.name;
   let responseId: string | undefined;
-  let toolCall: { id: string; result: T } | undefined;
-  const call = await exchange(socket, signal, (event) => {
+  let toolCall: { id: string; output: string } | undefined;
+  const textParts: string[] = [];
+  const result = await exchange(socket, signal, stage, (event) => {
     if (event.type === 'response.created' && event.response && event.response.metadata?.request_id === requestId) {
       responseId = event.response.id;
     }
     if (!responseId) return;
-    if (event.type === 'response.function_call_arguments.done' && event.response_id === responseId) {
+    if (useTools && event.type === 'response.function_call_arguments.done' && event.response_id === responseId) {
       if (toolCall || event.name !== tool.name || !event.call_id || !event.arguments) {
-        throw new Error('Inworld returned an invalid lesson tool call.');
+        throw new InworldRealtimeError(stage, 'invalid tool call');
       }
-      toolCall = { id: event.call_id, result: parse(event.arguments) };
+      toolCall = { id: event.call_id, output: event.arguments };
+    }
+    if (!useTools && event.type === 'response.output_text.done' && event.response_id === responseId &&
+      typeof event.text === 'string') {
+      textParts.push(event.text);
     }
     if (event.type === 'response.done' && event.response?.id === responseId) {
-      if (event.response.status !== 'completed' || !toolCall) {
-        throw new Error('Inworld did not finish the lesson tool call.');
+      if (event.response.status !== 'completed') {
+        const details = event.response.status_details;
+        if (toolCallingRestricted(details?.error)) {
+          throw new ToolCallingRestrictedError(stage, 'tool calling is restricted');
+        }
+        const codes = [event.response.status, details?.reason, details?.error?.type, details?.error?.code]
+          .map(diagnosticCode).filter(Boolean);
+        throw new InworldRealtimeError(stage, ['model response did not complete', ...codes].join(', '));
       }
-      return toolCall;
+      const output = useTools ? toolCall?.output : textParts.join('').trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1');
+      if (!output) throw new InworldRealtimeError(stage, 'model response did not include an answer');
+      try {
+        return { value: parse(output) };
+      } catch {
+        throw new InworldRealtimeError(stage, 'model output did not match the lesson format');
+      }
     }
   }, () => send(socket, {
     type: 'response.create',
     response: {
       output_modalities: ['text'],
-      tool_choice: 'required',
-      tools: [tool],
+      ...(useTools ? { tool_choice: 'required', tools: [tool] } : {}),
       max_output_tokens: maxTokens,
       metadata: { request_id: requestId },
-      instructions,
+      instructions: useTools
+        ? instructions + '\nCall ' + tool.name + ' exactly once.'
+        : instructions + '\nReturn only one compact JSON object matching this schema. Do not include any commentary or Markdown.\n' +
+          JSON.stringify(tool.parameters),
     },
   }));
-  send(socket, {
-    type: 'conversation.item.create',
-    item: { type: 'function_call_output', call_id: call.id, output: '{"received":true}' },
-  });
-  return call.result;
+  if (toolCall) {
+    send(socket, {
+      type: 'conversation.item.create',
+      item: { type: 'function_call_output', call_id: toolCall.id, output: '{"received":true}' },
+    });
+  }
+  return result.value;
 }
 
 export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connectSocket): RealtimeProvider | null {
   const apiKey = env.INWORLD_API_KEY;
   if (!apiKey) return null;
   const model = env.INWORLD_LESSON_MODEL || 'openai/gpt-6-luna';
+  let useTools = true;
   const session = {
     type: 'realtime',
     model,
@@ -212,8 +275,8 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
               const url = `wss://api.inworld.ai/api/v1/realtime/session?key=${randomUUID()}&protocol=realtime`;
               socket = connect(url, { Authorization: `Basic ${apiKey}` });
               const connected = socket;
-              await exchange(connected, signal, (event) => event.type === 'session.created' ? true : undefined);
-              await exchange(connected, signal, (event) => event.type === 'session.updated' ? true : undefined,
+              await exchange(connected, signal, 'WebSocket connection', (event) => event.type === 'session.created' ? true : undefined);
+              await exchange(connected, signal, 'session configuration', (event) => event.type === 'session.updated' ? true : undefined,
                 () => send(connected, { type: 'session.update', session }));
             }
             return await work(socket);
@@ -229,29 +292,51 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
         return next;
       }
 
+      function planLesson(level: LevelId) {
+        return run((connected) => {
+          send(connected, {
+            type: 'conversation.item.create',
+            item: {
+              type: 'message',
+              role: 'user',
+              content: [{ type: 'input_text', text: 'Prepare my Korean speaking lesson.' }],
+            },
+          });
+          return requestStructured(
+            connected, signal, planTool, useTools, planInstructions(level),
+            1000, (output) => readLessonPlan(output, level),
+          );
+        });
+      }
+
       return {
-        plan: (level) => run((connected) => requestTool(
-          connected, signal, planTool,
-          `${planInstructions(level)}\nCall plan_speaking_lesson with the agenda.`,
-          1400, (output) => readLessonPlan(output, level),
-        )),
+        async plan(level) {
+          try {
+            return await planLesson(level);
+          } catch (error) {
+            if (!(error instanceof ToolCallingRestrictedError) || signal.aborted) throw error;
+            // The rejected response may still have pending events. Retry on a fresh connection.
+            useTools = false;
+            return planLesson(level);
+          }
+        },
         evaluate: (audio, context) => run(async (connected) => {
           const transcript = await transcribe(connected, signal, audio);
-          const result = transcript ? await requestTool(connected, signal, assessmentTool, [
+          const result = transcript ? await requestStructured(connected, signal, assessmentTool, useTools, [
             assessmentInstructions,
-            'Call assess_speaking_goal for the most recent learner audio item. Earlier turns are context only.',
+            'Assess the most recent learner audio item. Earlier turns are context only.',
             JSON.stringify({ ...context, transcript }),
           ].join('\n'), 350, readAssessment) : null;
           return { transcript, result };
         }),
-        planChallenge: (level, goals) => run((connected) => requestTool(
-          connected, signal, challengePlanTool, challengeScenarioInstructions(level, goals),
+        planChallenge: (level, goals) => run((connected) => requestStructured(
+          connected, signal, challengePlanTool, useTools, challengeScenarioInstructions(level, goals),
           700, (output) => readChallengeScenario(output, goals),
         )),
         assessChallenge: (audio, { goal, cue, level }) => run(async (connected) => {
           const transcript = await transcribe(connected, signal, audio);
-          const result = transcript ? await requestTool(
-            connected, signal, challengeAssessmentTool,
+          const result = transcript ? await requestStructured(
+            connected, signal, challengeAssessmentTool, useTools,
             challengeAssessmentInstructions + '\n' + JSON.stringify({ level, criterion: goal.criterion, cue, transcript }),
             220, readChallengeAssessment,
           ) : null;

@@ -9,6 +9,7 @@ import type { SpokenReply, TutorVoice } from './elevenLabsVoice.ts';
 import { applyTurn, currentGoal, newProgress } from './session.ts';
 import type { LessonTurn, Progress } from './session.ts';
 import type { LessonPlan } from './lessonPlan.ts';
+import { InworldRealtimeError } from './inworldRealtime.ts';
 import type { RealtimeProvider, RealtimeRoom } from './inworldRealtime.ts';
 
 const prefix = '/api/lesson/sessions';
@@ -268,6 +269,8 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
             return session;
           } catch (error) {
             controller.abort();
+            const detail = error instanceof InworldRealtimeError ? error.message : 'Unexpected lesson setup error.';
+            console.warn('[Verba] Lesson setup failed. ' + detail);
             throw error;
           }
         })().finally(() => planning.delete(key));
