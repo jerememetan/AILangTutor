@@ -12,6 +12,9 @@ export const minPcmBytes = pcmSampleRate * 2 / 10;
 export const maxPcmBytes = pcmSampleRate * 2 * maxRecordingMs / 1000;
 
 export type TutorReply = { english: string; korean: string | null; prompt: string };
+export type ChatMessage =
+  | { id: string; speaker: 'tutor'; reply: TutorReply }
+  | { id: string; speaker: 'learner'; text: string; kind: 'speech' | 'hint' };
 export type GoalEvidence = { goal: GoalId; turnId: string; quote: string };
 export type Recap = {
   completed: GoalEvidence[];
@@ -23,6 +26,7 @@ export type SessionView = Recap & {
   activeGoal: GoalId | null;
   reply: TutorReply;
   audioPath: string;
+  messages: ChatMessage[];
   transcript?: string | null;
 };
 
@@ -36,7 +40,7 @@ export type ChallengeTaskResult = {
   example: string;
 };
 
-type ChallengeMedia = { reply: TutorReply; audioPath: string; transcript?: string | null };
+type ChallengeMedia = { reply: TutorReply; audioPath: string; messages: ChatMessage[]; transcript?: string | null };
 export type ChallengeView =
   | (ChallengeMedia & { status: 'active'; turn: ChallengeTurn })
   | (ChallengeMedia & { status: 'complete'; results: [ChallengeTaskResult, ChallengeTaskResult] })

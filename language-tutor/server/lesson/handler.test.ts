@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import viteConfig from '../../vite.config.ts';
 import { minPcmBytes, pcmAudioType, pcmSampleRate } from '../../src/lesson/lesson-contract.ts';
 import type {
-  ChallengeTurn, ChallengeView, GoalId, LevelId, OpenLesson, Recap, SessionView,
+  ChallengeTurn, ChallengeView, ChatMessage, GoalId, LevelId, OpenLesson, Recap, SessionView,
 } from '../../src/lesson/lesson-contract.ts';
 import type { ChallengeScenario } from './challenge.ts';
 import { createElevenLabsVoice } from './elevenLabsVoice.ts';
@@ -867,4 +867,161 @@ test('coaching adds gentle and encouraging delivery only to the synthesized spee
     `[gently] Here’s a polite greeting. 안녕하세요. [encouraging] ${modelGoals[0].practice}`,
     `[encouraging] Good practice. Now try it once more from memory. ${modelGoals[0].practice}`,
   ]);
+});
+
+test('records opening, trimmed speech, hint, and stripped tutor replies in server history', async () => {
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async evaluate(audio, context) {
+      const evaluated = await lessonRoom.evaluate(audio, context);
+      if (evaluated.transcript === clips.help && evaluated.result) {
+        return {
+          transcript: `  ${clips.help}  `,
+          result: { ...evaluated.result, english: `[gently] ${evaluated.result.english}` },
+        };
+      }
+      return evaluated;
+    },
+  })), fixtureVoice);
+
+  const session = await enter(handler);
+  assert.equal(session.view.messages.length, 1);
+  assert.equal(session.view.messages[0].speaker, 'tutor');
+  assert.deepEqual(Object.keys(session.view.messages[0].reply), ['english', 'korean', 'prompt']);
+  assert.deepEqual(session.view.messages[0].reply, session.view.reply);
+
+  const hintView = await handler(turn(session, 'goal-1')).then((r) => r.json()) as SessionView;
+  assert.equal(hintView.messages.length, 3);
+  assert.equal(hintView.messages[0].id, session.view.messages[0].id);
+  assert.deepEqual(
+    hintView.messages.slice(1).map((m) => (m.speaker === 'learner' ? { speaker: m.speaker, text: m.text, kind: m.kind } : m.speaker)),
+    [{ speaker: 'learner', text: 'Asked for a hint', kind: 'hint' }, 'tutor'],
+  );
+
+  const explanationView = await handler(turn(session, 'goal-1', clips.help)).then((r) => r.json()) as SessionView;
+  assert.equal(explanationView.messages.length, 5);
+  const learnerSpeech = explanationView.messages[3];
+  assert.equal(learnerSpeech.speaker, 'learner');
+  assert.equal(learnerSpeech.kind, 'speech');
+  assert.equal(learnerSpeech.text, clips.help);
+  const tutorReply = explanationView.messages[4];
+  assert.equal(tutorReply.speaker, 'tutor');
+  assert.equal(tutorReply.reply.korean, '안녕하세요.');
+  assert.deepEqual(Object.keys(tutorReply.reply), ['english', 'korean', 'prompt']);
+  assert.doesNotMatch(JSON.stringify(explanationView.messages), /\[(?:warmly|gently|encouraging)\]/);
+
+  const ids = explanationView.messages.map((message: ChatMessage) => message.id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepEqual(ids.slice(0, 3), hintView.messages.map((m) => m.id));
+});
+
+test('appends post-lesson challenge opening, learner speech, and tutor replies to the same stream', async () => {
+  const handler = createLessonHandler(fixtureProvider(), fixtureVoice);
+  const session = await enter(handler);
+  const lessonEnd = await finishLesson(handler, session);
+  const lessonCount = lessonEnd.messages.length;
+  assert.equal(lessonCount, 5);
+
+  const started = await handler(challengeRequest(session, 'start')).then((r) => r.json()) as Extract<ChallengeView, { status: 'active' }>;
+  assert.equal(started.status, 'active');
+  assert.equal(started.messages.length, lessonCount + 1);
+  assert.deepEqual(started.messages.slice(0, lessonCount), lessonEnd.messages);
+  const challengeOpening = started.messages[lessonCount];
+  assert.equal(challengeOpening.speaker, 'tutor');
+  assert.deepEqual(challengeOpening.reply, started.reply);
+
+  const question = await handler(challengeTurn(session, 1, clips.help)).then((r) => r.json()) as Extract<ChallengeView, { status: 'active' }>;
+  assert.equal(question.messages.length, lessonCount + 3);
+  assert.deepEqual(
+    question.messages.slice(lessonCount + 1).map((m) => (m.speaker === 'learner' ? { text: m.text, kind: m.kind } : m.reply)),
+    [{ text: clips.help, kind: 'speech' }, question.reply],
+  );
+
+  const turn1 = await handler(challengeTurn(session, 1, clips.greeting)).then((r) => r.json()) as Extract<ChallengeView, { status: 'active' }>;
+  assert.equal(turn1.turn, 2);
+  assert.equal(turn1.messages.length, lessonCount + 5);
+
+  const completed = await handler(challengeTurn(session, 2, clips.name)).then((r) => r.json()) as Extract<ChallengeView, { status: 'complete' }>;
+  assert.equal(completed.status, 'complete');
+  assert.equal(completed.messages.length, lessonCount + 7);
+  const lastMessage = completed.messages.at(-1)!;
+  assert.equal(lastMessage.speaker, 'tutor');
+  assert.deepEqual(lastMessage.reply, completed.reply);
+
+  const endedChallenge = await handler(challengeRequest(session, 'end')).then((r) => r.json()) as ChallengeView;
+  assert.deepEqual(endedChallenge, { status: 'ended' });
+});
+
+test('preserves history idempotency, snapshot immutability, blank transcript filtering, and clean end state', async () => {
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async evaluate(audio, context) {
+      const evaluated = await lessonRoom.evaluate(audio, context);
+      if (!evaluated.transcript) return { transcript: '   ', result: null };
+      return evaluated;
+    },
+    async assessChallenge(audio, context) {
+      const assessed = await lessonRoom.assessChallenge(audio, context);
+      if (!assessed.transcript) return { transcript: '   ', result: null };
+      return assessed;
+    },
+  })), fixtureVoice);
+
+  const entryId = randomUUID();
+  const [session, duplicateEntry] = await Promise.all([
+    enter(handler, 'beginner', entryId),
+    enter(handler, 'beginner', entryId),
+  ]);
+  assert.deepEqual(duplicateEntry.view.messages, session.view.messages);
+  assert.equal(session.view.messages.length, 1);
+
+  const sequentialEntry = await enter(handler, 'beginner', entryId, session.cookie);
+  assert.deepEqual(sequentialEntry.view.messages, session.view.messages);
+
+  const blankLessonId = randomUUID();
+  const blankLessonView = await handler(turn(session, 'goal-1', '   ', blankLessonId)).then((r) => r.json()) as SessionView;
+  assert.equal(blankLessonView.messages.length, 2);
+  assert.equal(blankLessonView.messages[1].speaker, 'tutor');
+  assert.equal(blankLessonView.messages.some((m) => m.speaker === 'learner'), false);
+
+  const turn1Id = randomUUID();
+  const turn1View = await handler(turn(session, 'goal-1', clips.greeting, turn1Id)).then((r) => r.json()) as SessionView;
+  const turn1Snapshot = structuredClone(turn1View);
+  assert.equal(turn1View.messages.length, 4);
+
+  const turn2View = await handler(turn(session, 'goal-2', clips.name)).then((r) => r.json()) as SessionView;
+  assert.equal(turn2View.messages.length, 6);
+  assert.deepEqual(turn1View.messages, turn1Snapshot.messages);
+
+  const retriedTurn1 = await handler(turn(session, 'goal-1', clips.greeting, turn1Id)).then((r) => r.json()) as SessionView;
+  assert.deepEqual(retriedTurn1, turn1Snapshot);
+
+  const challengeStart = await handler(challengeRequest(session, 'start')).then((r) => r.json()) as Extract<ChallengeView, { status: 'active' }>;
+  assert.equal(challengeStart.messages.length, 7);
+
+  const blankChallengeView = await handler(challengeTurn(session, 1, '   ')).then((r) => r.json()) as Extract<ChallengeView, { status: 'active' }>;
+  assert.equal(blankChallengeView.messages.length, 8);
+  assert.equal(blankChallengeView.messages.at(-1)?.speaker, 'tutor');
+
+  const challengeTurn1Id = randomUUID();
+  const challengeTurn1 = await handler(challengeTurn(session, 1, clips.greeting, challengeTurn1Id)).then((r) => r.json()) as Extract<ChallengeView, { status: 'active' }>;
+  const challengeTurn1Snapshot = structuredClone(challengeTurn1);
+  assert.equal(challengeTurn1.messages.length, 10);
+
+  const challengeTurn2 = await handler(challengeTurn(session, 2, clips.name)).then((r) => r.json()) as Extract<ChallengeView, { status: 'complete' }>;
+  assert.equal(challengeTurn2.messages.length, 12);
+  assert.deepEqual(challengeTurn1.messages, challengeTurn1Snapshot.messages);
+
+  const retriedChallenge1 = await handler(challengeTurn(session, 1, clips.greeting, challengeTurn1Id)).then((r) => r.json()) as ChallengeView;
+  assert.deepEqual(retriedChallenge1, challengeTurn1Snapshot);
+
+  assert.deepEqual(await handler(challengeRequest(session, 'end')).then((r) => r.json()), { status: 'ended' });
+  assert.deepEqual(await handler(challengeRequest(session, 'start')).then((r) => r.json()), { status: 'ended' });
+
+  const recap = await handler(new Request(`${base}/${session.sessionId}/end`, {
+    method: 'POST', headers: { Cookie: session.cookie },
+  })).then((r) => r.json()) as Recap;
+  assert.deepEqual(Object.keys(recap), ['completed', 'helpByGoal']);
+  assert.equal(recap.completed.length, 2);
+  const afterEnd = await handler(challengeRequest(session, 'start'));
+  assert.equal(afterEnd.status, 409);
+  assert.deepEqual(await afterEnd.json(), { error: 'This lesson has ended.' });
 });

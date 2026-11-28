@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { koreanTutorId } from './lesson-contract';
-import type { ChallengeTurn, ChallengeView, GoalId, LevelId, OpenLesson, Recap, SessionView } from './lesson-contract';
+import type { ChatMessage, ChallengeTurn, ChallengeView, GoalId, LevelId, OpenLesson, Recap, SessionView } from './lesson-contract';
 
 const endpoint = '/api/lesson/sessions';
 const turnTimeoutMs = 50_000;
@@ -52,6 +52,7 @@ export function useLessonSession(level: LevelId) {
   const [entryId, setEntryId] = useState(() => crypto.randomUUID());
   const [view, setView] = useState<SessionView | null>(null);
   const [recap, setRecap] = useState<Recap | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [challenge, setChallenge] = useState<ChallengeView | null>(null);
   const [challengeVisible, setChallengeVisible] = useState(false);
   const [pending, setPending] = useState(false);
@@ -91,6 +92,7 @@ export function useLessonSession(level: LevelId) {
         }
         id.current = opened.sessionId;
         setView(opened.view);
+        setMessages(opened.view.messages);
       } catch (reason) {
         if (!controller.signal.aborted && !ended.current) {
           setError(timeout.aborted ? 'Lesson setup took too long. Try again.'
@@ -120,12 +122,16 @@ export function useLessonSession(level: LevelId) {
       });
       if (action.type === 'lesson-turn') {
         const next = await readJson<SessionView>(response);
-        if (!controller.signal.aborted && !ended.current) setView(next);
+        if (!controller.signal.aborted && !ended.current) {
+          setView(next);
+          setMessages(next.messages);
+        }
       } else {
         const next = await readJson<ChallengeView>(response);
         if (!controller.signal.aborted && !ended.current) {
           setChallenge(next);
           setChallengeVisible(next.status !== 'ended');
+          if (next.status !== 'ended') setMessages(next.messages);
         }
       }
       if (!controller.signal.aborted) setCanRecordAgain(false);
@@ -133,10 +139,13 @@ export function useLessonSession(level: LevelId) {
       if (controller.signal.aborted || ended.current) return;
       if (reason instanceof LessonRequestError && reason.status === 409 && reason.currentView) {
         const current = reason.currentView;
-        if (action.type === 'lesson-turn' && 'agenda' in current) setView(current);
-        else if (action.type === 'challenge-turn' && 'status' in current) {
+        if (action.type === 'lesson-turn' && 'agenda' in current) {
+          setView(current);
+          setMessages(current.messages);
+        } else if (action.type === 'challenge-turn' && 'status' in current) {
           setChallenge(current);
           setChallengeVisible(current.status !== 'ended');
+          if (current.status !== 'ended') setMessages(current.messages);
         }
         setCanRecordAgain(false);
         setError(reason.message);
@@ -190,6 +199,7 @@ export function useLessonSession(level: LevelId) {
   function restartLesson() {
     if (!roomExpired) return;
     setView(null);
+    setMessages([]);
     setChallenge(null);
     setChallengeVisible(false);
     setRoomExpired(false);
@@ -228,7 +238,7 @@ export function useLessonSession(level: LevelId) {
   }
 
   return {
-    view, recap, pending, error, failedAction, submit, end, challenge, challengeVisible,
+    view, recap, messages, pending, error, failedAction, submit, end, challenge, challengeVisible,
     startChallenge, endChallenge, recordAgain, canRecordAgain, roomExpired, restartLesson,
     showChallengeResults: () => { if (challenge?.status === 'complete') setChallengeVisible(true); },
     backToLessonRecap: () => setChallengeVisible(false),
@@ -236,6 +246,7 @@ export function useLessonSession(level: LevelId) {
       if (retryAction.current) void send(retryAction.current);
       else if (!id.current && !ended.current) {
         setError('');
+        setMessages([]);
         setEntryId(crypto.randomUUID());
       }
     },

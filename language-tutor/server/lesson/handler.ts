@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { koreanTutorId, levelIds, maxPcmBytes, minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
 import type {
-  ChallengeTaskResult, ChallengeTurn, ChallengeView, LevelId, Recap, SessionView,
+  ChallengeTaskResult, ChallengeTurn, ChallengeView, ChatMessage, LevelId, Recap, SessionView, TutorReply,
 } from '../../src/lesson/lesson-contract.ts';
 import { challengeCueReply, challengeSummary, decideChallengeAttempt, pickChallengeGoals } from './challenge.ts';
 import type { ChallengeGoals, ChallengeScenario } from './challenge.ts';
@@ -44,6 +44,7 @@ type Session = {
   plan: LessonPlan;
   progress: Progress;
   latest: SessionView;
+  messages: ChatMessage[];
   turnResults: Map<string, SessionView>;
   audio: Map<string, ReplyAudio>;
   pendingTurn?: PendingTurn;
@@ -77,6 +78,31 @@ function processTurn(state: { pendingTurn?: PendingTurn }, id: string, work: () 
 const browserId = (request: Request) => request.headers.get('cookie')?.match(/(?:^|; )verba_lesson=([a-f0-9-]{36})(?:;|$)/i)?.[1];
 const recap = ({ completed, helpByGoal }: Progress): Recap => ({ completed, helpByGoal });
 
+const stripDelivery = (text: string) => text.replace(/\[(?:warmly|gently|encouraging)\]\s*/g, '').trim();
+const toTutorReply = ({ english, korean, prompt }: SpokenReply): TutorReply => ({
+  english: stripDelivery(english),
+  korean: korean === null ? null : stripDelivery(korean),
+  prompt: stripDelivery(prompt),
+});
+
+function pushTutorMessage(session: Pick<Session, 'messages'>, reply: SpokenReply) {
+  session.messages.push({ id: randomUUID(), speaker: 'tutor', reply: toTutorReply(reply) });
+}
+
+function pushLearnerMessage(session: Pick<Session, 'messages'>, text: string, kind: 'speech' | 'hint') {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  session.messages.push({ id: randomUUID(), speaker: 'learner', text: trimmed, kind });
+}
+
+function snapshotMessages(messages: readonly ChatMessage[]): ChatMessage[] {
+  return messages.map((message) =>
+    message.speaker === 'tutor'
+      ? { ...message, reply: { ...message.reply } }
+      : { ...message },
+  );
+}
+
 function cacheReply(session: Pick<Session, 'id' | 'audio'>, reply: SpokenReply) {
   const id = randomUUID();
   session.audio.set(id, { reply });
@@ -85,16 +111,16 @@ function cacheReply(session: Pick<Session, 'id' | 'audio'>, reply: SpokenReply) 
     const oldest = session.audio.keys().next().value;
     if (oldest) session.audio.delete(oldest);
   }
-  const { english, korean, prompt } = reply;
-  return { reply: { english, korean, prompt }, audioPath: prefix + '/' + session.id + '/audio/' + id };
+  return { reply: toTutorReply(reply), audioPath: prefix + '/' + session.id + '/audio/' + id };
 }
 
-function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>, reply: SpokenReply): SessionView {
+function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress' | 'messages'>, reply: SpokenReply): SessionView {
   return {
     ...recap(session.progress),
     agenda: { title: session.plan.title, goals: session.plan.goals.map(({ id, title, practice }) => ({ id, title, practice })) },
     activeGoal: currentGoal(session.plan, session.progress)?.id ?? null,
     ...cacheReply(session, reply),
+    messages: snapshotMessages(session.messages),
   };
 }
 
@@ -107,7 +133,15 @@ const endedChallenge: ChallengeView = { status: 'ended' };
 const turnConflict = () => problem(409, 'This challenge turn is no longer active.');
 
 function activeChallengeView(session: Session, turn: ChallengeTurn, reply: SpokenReply): OpenChallengeView {
-  return { status: 'active', turn, ...cacheReply(session, reply) };
+  return { status: 'active', turn, ...cacheReply(session, reply), messages: snapshotMessages(session.messages) };
+}
+
+function completeChallengeView(
+  session: Session,
+  results: [ChallengeTaskResult, ChallengeTaskResult],
+  reply: SpokenReply,
+): OpenChallengeView {
+  return { status: 'complete', results, ...cacheReply(session, reply), messages: snapshotMessages(session.messages) };
 }
 
 async function startChallenge(session: Session) {
@@ -120,7 +154,9 @@ async function startChallenge(session: Session) {
     if (session.ended || session.controller.signal.aborted || session.challenge === null) {
       throw new Error('Challenge closed during setup.');
     }
-    const latest = activeChallengeView(session, 1, challengeCueReply(scenario.cues[0], scenario.opening, 'warmly'));
+    const openingReply = challengeCueReply(scenario.cues[0], scenario.opening, 'warmly');
+    pushTutorMessage(session, openingReply);
+    const latest = activeChallengeView(session, 1, openingReply);
     const challenge: ChallengeSession = { goals, scenario, latest, turnResults: new Map() };
     session.challenge = challenge;
     return challenge;
@@ -173,21 +209,30 @@ async function assessChallengeTurn(
     const { transcript, result } = await session.room.assessChallenge(bytes, { goal, cue, level: session.level });
     if (!stillOpen()) return turnConflict();
     const decision = decideChallengeAttempt(transcript, result);
+    if (decision.kind === 'result' && turn !== 1 && !challenge.firstResult) {
+      throw new Error('The first turn is missing.');
+    }
+    pushLearnerMessage(session, transcript, 'speech');
     if (decision.kind === 'result') {
       const outcome = { title: goal.title, outcome: decision.outcome, quote: decision.quote, example: goal.example };
       if (turn === 1) {
         challenge.firstResult = outcome;
-        challenge.latest = activeChallengeView(session, 2, challengeCueReply(challenge.scenario.cues[1], 'Thanks.', 'warmly'));
+        const reply = challengeCueReply(challenge.scenario.cues[1], 'Thanks.', 'warmly');
+        pushTutorMessage(session, reply);
+        challenge.latest = activeChallengeView(session, 2, reply);
       } else {
-        if (!challenge.firstResult) throw new Error('The first turn is missing.');
-        const results: [ChallengeTaskResult, ChallengeTaskResult] = [challenge.firstResult, outcome];
-        challenge.latest = { status: 'complete', results, ...cacheReply(session, challengeSummary(results)) };
+        const results: [ChallengeTaskResult, ChallengeTaskResult] = [challenge.firstResult!, outcome];
+        const reply = challengeSummary(results);
+        pushTutorMessage(session, reply);
+        challenge.latest = completeChallengeView(session, results, reply);
       }
     } else {
       const lead = decision.kind === 'question'
         ? 'Try what you remember, or tell me if you’re unsure.'
         : 'I didn’t catch that clearly. Try recording again.';
-      challenge.latest = activeChallengeView(session, turn, challengeCueReply(cue, lead, 'gently'));
+      const reply = challengeCueReply(cue, lead, 'gently');
+      pushTutorMessage(session, reply);
+      challenge.latest = activeChallengeView(session, turn, reply);
     }
     challenge.latest.transcript = transcript.trim() || null;
     challenge.turnResults.set(id, challenge.latest);
@@ -277,16 +322,23 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
             const room = provider.room(controller.signal);
             const plan = await room.plan(level);
             const start = {
-              id: randomUUID(), plan, progress: newProgress(), audio: new Map<string, ReplyAudio>(), room,
+              id: randomUUID(),
+              plan,
+              progress: newProgress(),
+              audio: new Map<string, ReplyAudio>(),
+              messages: [] as ChatMessage[],
+              room,
             };
+            const openingReply: SpokenReply = {
+              delivery: 'warmly',
+              english: plan.opening,
+              korean: null,
+              prompt: plan.goals[0].practice,
+            };
+            pushTutorMessage(start, openingReply);
             const session: Session = {
               ...start, owner: owner ?? randomUUID(), entryId, level,
-              latest: writeView(start, {
-                delivery: 'warmly',
-                english: plan.opening,
-                korean: null,
-                prompt: plan.goals[0].practice,
-              }),
+              latest: writeView(start, openingReply),
               turnResults: new Map(), ended: false, lastActivity: Date.now(), controller,
             };
             sessions.set(session.id, session);
@@ -321,6 +373,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       session.controller.abort();
       session.audio.clear();
       session.turnResults.clear();
+      session.messages.length = 0;
       delete session.latest.transcript;
       session.challenge = null;
       return json(recap(session.progress));
@@ -381,6 +434,12 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
         if (session.ended || session.controller.signal.aborted) return problem(409, 'This lesson has ended.');
         const { progress, reply } = applyTurn(session.plan, session.progress, turn);
         session.progress = progress;
+        if (turn.kind === 'hint') {
+          pushLearnerMessage(session, 'Asked for a hint', 'hint');
+        } else {
+          pushLearnerMessage(session, turn.transcript, 'speech');
+        }
+        pushTutorMessage(session, reply);
         session.latest = writeView(session, reply);
         if (turn.kind === 'speech') session.latest.transcript = turn.transcript.trim() || null;
         session.turnResults.set(id, session.latest);
