@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
+import viteConfig from '../../vite.config.ts';
 import { minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
-import type { GoalId, LevelId, OpenLesson, Recap, SessionView } from '../../src/lesson/lesson-contract.ts';
+import type {
+  ChallengeTurn, ChallengeView, GoalId, LevelId, OpenLesson, Recap, SessionView,
+} from '../../src/lesson/lesson-contract.ts';
+import type { ChallengeScenario } from './challenge.ts';
 import { createElevenLabsVoice } from './elevenLabsVoice.ts';
 import type { TutorVoice } from './elevenLabsVoice.ts';
 import { createLessonHandler } from './handler.ts';
@@ -46,8 +50,26 @@ function transcriptAudio(text: string) {
 const demonstrated = (evidence: string): Assessment => ({
   verdict: 'demonstrated', evidence, english: 'Good practice.', korean: null, gaveExample: false,
 });
+const scenario: ChallengeScenario = {
+  opening: 'You just arrived at exchange orientation.',
+  cues: [
+    { english: 'Greet your new exchange buddy.', korean: null },
+    { english: 'Tell me your name.', korean: '이름이 뭐예요?' },
+  ],
+};
 const lessonRoom: RealtimeRoom = {
   async plan(level) { return readLessonPlan(JSON.stringify(modelAgenda(level)), level); },
+  async planChallenge() { return scenario; },
+  async assessChallenge(audio) {
+    const transcript = new TextDecoder().decode(audio).replace(/\0+$/, '').trim();
+    if (!transcript) return { transcript, result: null };
+    if (transcript === clips.help) return { transcript, result: { verdict: 'question', evidence: null } };
+    if (transcript === "I don't know") return { transcript, result: { verdict: 'practice', evidence: null } };
+    if (transcript === clips.badQuote) {
+      return { transcript, result: { verdict: 'demonstrated', evidence: clips.greeting } };
+    }
+    return { transcript, result: { verdict: 'demonstrated', evidence: transcript } };
+  },
   async evaluate(audio) {
     const transcript = new TextDecoder().decode(audio).replace(/\0+$/, '').trim();
     if (!transcript) return { transcript, result: null };
@@ -74,6 +96,27 @@ function entryRequest(level: LevelId, entryId = randomUUID(), priorCookie = '') 
   });
 }
 
+test('the Vite proxy preserves the browser host for the lesson origin check', async () => {
+  for (const config of [viteConfig.server, viteConfig.preview]) {
+    const proxy = config?.proxy?.['/api/lesson'];
+    assert.ok(proxy && typeof proxy === 'object');
+    assert.equal(proxy.changeOrigin, false);
+  }
+
+  const handler = createLessonHandler(fixtureProvider(), fixtureVoice);
+  const browserOrigin = 'http://localhost:5173';
+  function open(host: string, site: string) {
+    const headers = new Headers({ Origin: browserOrigin, 'Sec-Fetch-Site': site, 'Content-Type': 'application/json' });
+    return handler(new Request(host + '/api/lesson/sessions', {
+      method: 'POST', headers,
+      body: JSON.stringify({ tutorId: 'vita', level: 'beginner', entryId: randomUUID() }),
+    }));
+  }
+  assert.equal((await open(browserOrigin, 'same-origin')).status, 201);
+  assert.equal((await open('http://127.0.0.1:8787', 'same-origin')).status, 403);
+  assert.equal((await open(browserOrigin, 'cross-site')).status, 403);
+});
+
 async function enter(handler: ReturnType<typeof createLessonHandler>, level: LevelId = 'beginner', entryId = randomUUID(), priorCookie = '') {
   const response = await handler(entryRequest(level, entryId, priorCookie));
   assert.ok(response.ok);
@@ -92,6 +135,35 @@ function turn(session: Awaited<ReturnType<typeof enter>>, goal: GoalId, answer?:
   return new Request(`${base}/${session.sessionId}/turns`, {
     method: 'POST', headers: { Cookie: session.cookie }, body,
   });
+}
+
+type TestSession = Awaited<ReturnType<typeof enter>>;
+type TestHandler = ReturnType<typeof createLessonHandler>;
+
+function challengeRequest(session: TestSession, action: string, body?: FormData) {
+  return new Request(base + '/' + session.sessionId + '/challenge/' + action, {
+    method: 'POST', headers: { Cookie: session.cookie }, body,
+  });
+}
+
+function challengeTurn(session: TestSession, number: ChallengeTurn, answer?: string, id = randomUUID()) {
+  const body = new FormData();
+  body.set('turnId', id);
+  body.set('turn', String(number));
+  if (answer !== undefined) body.set('audio', transcriptAudio(answer), 'answer');
+  return challengeRequest(session, 'turns', body);
+}
+
+async function finishLesson(handler: TestHandler, session: TestSession, helpWith?: GoalId) {
+  let view = session.view;
+  for (const goal of view.agenda.goals) {
+    if (goal.id === helpWith) assert.ok((await handler(turn(session, goal.id))).ok);
+    const response = await handler(turn(session, goal.id, clips.greeting));
+    assert.ok(response.ok);
+    view = await response.json() as SessionView;
+  }
+  assert.equal(view.activeGoal, null);
+  return view;
 }
 
 type ClientEvent = {
@@ -148,6 +220,160 @@ function sendToolResult(socket: FakeInworldSocket, request: ClientEvent, result:
 }
 
 const pcmClip = new Blob([new Uint8Array(minPcmBytes)], { type: pcmAudioType });
+
+test('the same Inworld room plans a lesson and a challenge and assesses the latest speech', async () => {
+  const controller = new AbortController();
+  let connections = 0;
+  const calls: string[] = [];
+  const provider = createRealtimeProvider({ INWORLD_API_KEY: 'fake' }, () => {
+    connections++;
+    return new FakeInworldSocket((socket, event) => {
+      if (event.type === 'session.update') socket.emit({ type: 'session.updated' });
+      if (event.type === 'input_audio_buffer.commit') sendTranscript(socket, '안녕하십니까');
+      if (event.type !== 'response.create') return;
+      const name = event.response?.tools[0].name ?? '';
+      calls.push(name);
+      if (name === 'plan_speaking_lesson') sendToolResult(socket, event, modelAgenda('beginner'));
+      if (name === 'plan_speaking_challenge') {
+        assert.doesNotMatch(event.response?.instructions ?? '', /Think of a phrase|안녕하세요/);
+        sendToolResult(socket, event, scenario);
+      }
+      if (name === 'assess_challenge_turn') {
+        assert.match(event.response?.instructions ?? '', /안녕하십니까/);
+        sendToolResult(socket, event, { verdict: 'demonstrated', evidence: '안녕하십니까' });
+      }
+    }) as unknown as WebSocket;
+  });
+  assert.ok(provider);
+  try {
+    const room = provider.room(controller.signal);
+    const { goals } = await room.plan('beginner');
+    const planned = await room.planChallenge('beginner', [goals[0], goals[1]]);
+    const attempt = await room.assessChallenge(new Uint8Array(minPcmBytes), {
+      goal: goals[0], cue: planned.cues[0], level: 'beginner',
+    });
+    assert.deepEqual(planned, scenario);
+    assert.deepEqual(attempt, { transcript: '안녕하십니까', result: { verdict: 'demonstrated', evidence: '안녕하십니까' } });
+    assert.equal(connections, 1);
+    assert.deepEqual(calls, ['plan_speaking_lesson', 'plan_speaking_challenge', 'assess_challenge_turn']);
+  } finally {
+    controller.abort();
+  }
+});
+
+test('the optional challenge prioritizes earlier help and reveals results after two accepted turns', async () => {
+  let planned = 0;
+  let assessments = 0;
+  let voiceCalls = 0;
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async planChallenge(level, goals) {
+      planned++;
+      assert.equal(level, 'comfortable');
+      assert.deepEqual(goals.map(({ id }) => id), ['goal-1', 'goal-3']);
+      return scenario;
+    },
+    async assessChallenge(audio, context) {
+      assessments++;
+      return lessonRoom.assessChallenge(audio, context);
+    },
+  })), async (reply, emit, signal) => {
+    voiceCalls++;
+    await fixtureVoice(reply, emit, signal);
+  });
+  const session = await enter(handler, 'comfortable');
+  assert.equal((await handler(challengeRequest(session, 'start'))).status, 409);
+  const snapshot = await finishLesson(handler, session, 'goal-3');
+  const stranger = await enter(handler);
+  assert.equal((await handler(challengeRequest({ ...session, cookie: stranger.cookie }, 'start'))).status, 404);
+  const begin = () => handler(challengeRequest(session, 'start')).then((response) => response.json() as Promise<ChallengeView>);
+  const [first, duplicateStart] = await Promise.all([begin(), begin()]);
+  assert.deepEqual(first, duplicateStart);
+  assert.equal(planned, 1);
+  assert.equal(first.status, 'active');
+  assert.equal(first.turn, 1);
+  assert.equal('results' in first, false);
+  assert.equal((await handler(challengeTurn(session, 1))).status, 415);
+  assert.equal(assessments, 0);
+  const answer = async (number: ChallengeTurn, speech: string, id?: string) => {
+    const response = await handler(challengeTurn(session, number, speech, id));
+    assert.ok(response.ok);
+    return await response.json() as ChallengeView;
+  };
+  const silence = await answer(1, '');
+  assert.equal(silence.status, 'active');
+  assert.equal(silence.turn, 1);
+  assert.match(silence.reply.english, /recording again/);
+  const question = await answer(1, clips.help);
+  assert.equal(question.status, 'active');
+  assert.equal(question.turn, 1);
+  assert.match(question.reply.english, /what you remember/);
+  const inventedEvidence = await answer(1, clips.badQuote);
+  assert.equal(inventedEvidence.status, 'active');
+  assert.equal(inventedEvidence.turn, 1);
+  const id = randomUUID();
+  const second = await answer(1, '안녕하십니까', id);
+  assert.equal(second.status, 'active');
+  assert.equal(second.turn, 2);
+  assert.equal('results' in second, false);
+  assert.deepEqual(await answer(1, '안녕하십니까', id), second);
+  assert.equal(assessments, 4);
+  const finalId = randomUUID();
+  const final = await answer(2, "I don't know", finalId);
+  assert.equal(final.status, 'complete');
+  assert.deepEqual(final.results.map(({ outcome }) => outcome), ['independent', 'practice']);
+  assert.equal(final.results[0].quote, '안녕하십니까');
+  assert.equal(final.results[1].quote, null);
+  assert.ok(final.results[1].example);
+  assert.deepEqual(await answer(2, "I don't know", finalId), final);
+  assert.deepEqual(await begin(), final);
+  for (let replay = 0; replay < 2; replay++) {
+    const response = await handler(new Request(new URL(final.audioPath, base), { headers: { Cookie: session.cookie } }));
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([1, 2, 3, 4]));
+  }
+  assert.equal(voiceCalls, 1);
+  assert.equal(assessments, 5);
+  const recap = await handler(new Request(base + '/' + session.sessionId + '/end', {
+    method: 'POST', headers: { Cookie: session.cookie },
+  })).then((response) => response.json());
+  assert.deepEqual(recap, { completed: snapshot.completed, helpByGoal: snapshot.helpByGoal });
+});
+
+test('challenge setup and speech retry after provider errors, and closing discards late assessments', async () => {
+  let plans = 0;
+  let assessments = 0;
+  let assessing: () => void = () => {};
+  const inFlight = new Promise<void>((resolve) => { assessing = resolve; });
+  let release: () => void = () => {};
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async planChallenge() {
+      if (++plans === 1) throw new Error('Temporary planning failure');
+      return scenario;
+    },
+    async assessChallenge(audio, context) {
+      if (++assessments === 1) throw new Error('Temporary assessment failure');
+      assessing();
+      await hold;
+      return lessonRoom.assessChallenge(audio, context);
+    },
+  })), fixtureVoice);
+  const session = await enter(handler);
+  await finishLesson(handler, session);
+  assert.equal((await handler(challengeRequest(session, 'start'))).status, 502);
+  assert.ok((await handler(challengeRequest(session, 'start'))).ok);
+  const id = randomUUID();
+  assert.equal((await handler(challengeTurn(session, 1, clips.greeting, id))).status, 502);
+  const retry = handler(challengeTurn(session, 1, clips.greeting, id));
+  await inFlight;
+  const close = () => handler(challengeRequest(session, 'end')).then((response) => response.json());
+  assert.deepEqual(await close(), { status: 'ended' });
+  release();
+  assert.equal((await retry).status, 409);
+  assert.deepEqual(await close(), { status: 'ended' });
+  assert.deepEqual(await handler(challengeRequest(session, 'start')).then((response) => response.json()), { status: 'ended' });
+  assert.equal((await handler(challengeTurn(session, 1, clips.greeting))).status, 409);
+  assert.equal(assessments, 2);
+});
 
 test('Inworld checks spoken evidence while ElevenLabs streams the welcome early and caches it for replay', async () => {
   let connections = 0;

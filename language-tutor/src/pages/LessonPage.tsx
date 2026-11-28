@@ -5,7 +5,7 @@ import TutorAvatar from '../components/TutorAvatar';
 import { getLevel } from '../data/levels';
 import type { Tutor } from '../data/tutors';
 import { koreanTutorId } from '../lesson/lesson-contract';
-import type { LevelId, Recap } from '../lesson/lesson-contract';
+import type { ChallengeView, LevelId, Recap } from '../lesson/lesson-contract';
 import { useLearnerAudio } from '../lesson/useLearnerAudio';
 import { useLessonSession } from '../lesson/useLessonSession';
 import { useStreamingTutorAudio } from '../lesson/useStreamingTutorAudio';
@@ -36,32 +36,49 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
   const [captions, setCaptions] = useState(true);
   const [sound, setSound] = useState(true);
   const { view, recap, pending } = session;
+  const challenge = session.challengeVisible && session.challenge?.status !== 'ended' ? session.challenge : null;
+  const activeChallenge = challenge?.status === 'active' ? challenge : null;
   const agenda = view?.agenda;
-  const audioPath = recap ? undefined : view?.audioPath;
+  const lessonMedia = recap || session.challenge ? undefined : view;
+  const audioPath = challenge?.audioPath ?? lessonMedia?.audioPath;
   const tutorAudio = useStreamingTutorAudio(audioPath, sound);
   const speaking = tutorAudio.status === 'playing';
   const loadingAudio = tutorAudio.status === 'loading';
   const activeGoal = view?.activeGoal;
+  const canCapture = Boolean(activeGoal || activeChallenge);
   const activePrompt = agenda?.goals.find((goal) => goal.id === activeGoal)?.practice;
   const holding = mic.status === 'starting' || mic.status === 'recording';
   const capturing = holding || mic.status === 'finishing';
-  const ready = Boolean(activeGoal && !recap && !pending && !session.retryable && !speaking && !loadingAudio);
+  const ready = canCapture && !recap && !pending && !session.failedAction && !speaking && !loadingAudio;
   const progress: Recap = recap ?? view ?? { completed: [], helpByGoal: {} };
   const finished = Boolean(view && !activeGoal);
-  const reply = view?.reply;
+  const reply = challenge?.reply ?? lessonMedia?.reply;
   const message = session.error || mic.error;
+  const textFallback = !captions && (!sound || tutorAudio.status === 'blocked' || tutorAudio.status === 'error');
+  const retryLabel = session.failedAction === 'challenge-start' ? 'Retry challenge setup'
+    : session.failedAction === 'challenge-end' ? 'Retry closing challenge'
+    : session.failedAction ? 'Retry turn' : 'Retry lesson setup';
   const state = recap ? 'Lesson ended'
     : speaking ? 'Jiwon is speaking'
     : holding ? mic.status === 'starting' ? 'Opening microphone…' : 'Recording · release to send'
+    : pending && finished && !session.challenge ? 'Preparing the challenge…'
+    : pending && session.challenge?.status === 'ended' ? 'Closing the challenge…'
     : pending || mic.status === 'finishing' ? 'Processing your turn…'
     : loadingAudio ? 'Preparing Jiwon’s audio…'
+    : activeChallenge ? 'Your turn'
+    : challenge?.status === 'complete' ? 'Challenge complete'
     : finished ? 'Lesson complete'
     : view ? 'Your turn' : session.error ? 'Lesson unavailable' : 'Planning your lesson…';
 
   function end() {
-    mic.cancel();
     tutorAudio.stop();
-    session.end();
+    if (activeChallenge) {
+      mic.finish(true);
+      session.endChallenge();
+    } else {
+      mic.cancel();
+      session.end();
+    }
   }
 
   return (
@@ -71,7 +88,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           if (!recap && (capturing || pending || progress.completed.length > 0) &&
             !window.confirm('Leave this call and return to level selection?')) event.preventDefault();
         }}><ArrowLeft aria-hidden="true" size={17} /> Back</Link>
-        <h1>{agenda?.title ?? 'Korean practice'}</h1>
+        <h1>{challenge ? 'Meet your Korean exchange buddy' : agenda?.title ?? 'Korean practice'}</h1>
         <span>{tutor.language}</span>
       </div>
 
@@ -90,7 +107,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           )}
           <div className="lesson-dock">
             <button type="button" className="lesson-control" aria-pressed={mic.armed}
-              disabled={!view || Boolean(recap) || finished} onClick={() => void mic.toggle()}>
+              disabled={!canCapture || Boolean(recap)} onClick={() => void mic.toggle()}>
               {mic.armed ? <Mic size={19} /> : <MicOff size={19} />}
               <span>{mic.armed ? 'Mic on' : mic.status === 'permission' ? 'Opening…' : 'Mic off'}</span>
             </button>
@@ -105,12 +122,12 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
               <Captions size={19} /><span>Captions</span>
             </button>
             <button type="button" className="lesson-control lesson-end" disabled={Boolean(recap)} onClick={end}>
-              <PhoneOff size={19} /><span>End lesson</span>
+              <PhoneOff size={19} /><span>{activeChallenge ? 'End challenge' : 'End lesson'}</span>
             </button>
           </div>
           {!recap && (
             <div className="lesson-turn">
-              {activeGoal && (
+              {canCapture && (
                 <button
                   type="button"
                   className={`lesson-push${holding ? ' is-recording' : ''}`}
@@ -142,18 +159,21 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
                   <Play size={15} aria-hidden="true" /> {tutorAudio.status === 'blocked' ? 'Play tutor audio' : 'Retry tutor audio'}
                 </button>
               )}
-              {activeGoal && !mic.armed && !message && <small>Turn on your mic to speak.</small>}
+              {canCapture && !mic.armed && !message && <small>Turn on your mic to speak.</small>}
               {message && <p className="lesson-error" role="alert">{message}</p>}
-              {session.error && (!view || session.retryable) && (
+              {session.error && (!view || session.failedAction) && (
                 <button type="button" className="lesson-secondary" onClick={session.retry}>
-                  {session.retryable ? 'Retry turn' : 'Retry lesson setup'}
+                  {retryLabel}
                 </button>
               )}
             </div>
           )}
         </section>
 
-        <aside className="lesson-agenda" aria-label={recap || finished ? 'Lesson recap' : 'Lesson goals'}>
+        {challenge ? <ChallengePanel challenge={challenge} textFallback={textFallback} tutorId={tutor.id} onBack={() => {
+          tutorAudio.stop();
+          session.backToLessonRecap();
+        }} /> : <aside className="lesson-agenda" aria-label={recap || finished ? 'Lesson recap' : 'Lesson goals'}>
           <h2>{recap || finished ? 'Lesson recap' : 'Speaking goals'}</h2>
           {agenda && <>
             <p className="lesson-count" aria-live="polite">{progress.completed.length} of {agenda.goals.length} completed</p>
@@ -176,13 +196,22 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           </>}
           {(recap || finished) ? (
             <div className="lesson-next">
-              {finished && !recap && <p>{reply?.prompt}</p>}
-              <Link className="lesson-link" to={`/?tutor=${tutor.id}`}>Back to tutors</Link>
+              {finished && !recap && <p>{view?.reply.prompt}</p>}
+              <div className="lesson-recap-actions">
+                {finished && !recap && !session.challenge && (
+                  <button type="button" className="lesson-secondary" disabled={pending || Boolean(session.failedAction)}
+                    onClick={session.startChallenge}>{pending ? 'Preparing challenge…' : 'Try a speaking challenge'}</button>
+                )}
+                {finished && !recap && session.challenge?.status === 'complete' && (
+                  <button type="button" className="lesson-secondary" onClick={session.showChallengeResults}>View challenge results</button>
+                )}
+                <Link className="lesson-link" to={`/?tutor=${tutor.id}`}>Back to tutors</Link>
+              </div>
             </div>
           ) : activeGoal && (
             <div className="lesson-next">
               <p>{reply?.prompt || activePrompt}</p>
-              {!captions && (!sound || tutorAudio.status === 'blocked' || tutorAudio.status === 'error') && reply && (
+              {textFallback && reply && (
                 <div className="lesson-text-fallback">
                   <p>{reply.english}</p>
                   {reply.korean && <p lang="ko">{reply.korean}</p>}
@@ -192,8 +221,50 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
                 onClick={() => session.submit()}><CircleHelp size={16} aria-hidden="true" /> Need a hint?</button>
             </div>
           )}
-        </aside>
+        </aside>}
       </div>
     </main>
+  );
+}
+
+function ChallengePanel({ challenge, textFallback, tutorId, onBack }: {
+  challenge: Exclude<ChallengeView, { status: 'ended' }>;
+  textFallback: boolean;
+  tutorId: string;
+  onBack: () => void;
+}) {
+  const complete = challenge.status === 'complete';
+  return (
+    <aside className="lesson-agenda" aria-label={complete ? 'Challenge results' : 'Speaking challenge'}>
+      <h2>{complete ? 'Challenge results' : 'Speaking challenge'}</h2>
+      {!complete && <p className="lesson-count" aria-live="polite">Turn {challenge.turn} of 2</p>}
+      {textFallback && (
+        <div className="lesson-text-fallback">
+          <p>{challenge.reply.english} {challenge.reply.prompt}</p>
+          {challenge.reply.korean && <p lang="ko">{challenge.reply.korean}</p>}
+        </div>
+      )}
+      {complete && (
+        <>
+          <ol className="lesson-goals lesson-challenge-results">
+            {challenge.results.map(({ title, outcome, quote, example }, index) => (
+              <li key={title}>
+                <span className="lesson-goal-marker" aria-hidden="true">{index + 1}</span>
+                <div>
+                  <strong>{title}</strong>
+                  <small>{outcome === 'independent' ? 'Did it independently' : 'Can practise this again'}</small>
+                  {quote && <p>You said <span lang="ko">{quote}</span></p>}
+                  <p>Example <span lang="ko">{example}</span></p>
+                </div>
+              </li>
+            ))}
+          </ol>
+          <div className="lesson-recap-actions">
+            <button type="button" className="lesson-secondary" onClick={onBack}>Back to lesson recap</button>
+            <Link className="lesson-link" to={`/?tutor=${tutorId}`}>Back to tutors</Link>
+          </div>
+        </>
+      )}
+    </aside>
   );
 }

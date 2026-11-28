@@ -198,6 +198,8 @@
 .lesson-goals small { display: block; color: var(--room-muted); margin-top: 4px; }
 .lesson-next p { margin: 0 0 10px; font-size: 14px; line-height: 1.5; }
 .lesson-text-fallback { color: var(--room-muted); }
+.lesson-recap-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.lesson-challenge-results p { margin: 6px 0 0; }
 .lesson-preview h1 { color: inherit; }
 
 @media (max-width: 760px) {

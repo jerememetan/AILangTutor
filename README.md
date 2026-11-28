@@ -14,6 +14,8 @@ The playable lesson is a first meeting in Korean with Han Jiwon. Each call gener
 
 Hold **Push to speak**, answer in Korean or ask for help in English, then release to send. Jiwon can explain a phrase and give you another try. A goal checks off when your answer demonstrates it. The call ends with a recap of what you practised. Four other tutors are available to preview in the character picker.
 
+After you complete the Korean lesson, select **Try a speaking challenge** from the recap. Meet Jiwon as an exchange buddy and use two skills you just practised. Feedback and example answers appear after both speaking turns.
+
 ## Run locally
 
 Use Node.js 22.20 or newer. From the repository root, run the following in PowerShell.

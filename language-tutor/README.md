@@ -32,6 +32,8 @@ Open the Vite URL. Choose **Han Jiwon**, select **New to it**, and start the les
 
 Each new room generates a speaking agenda about meeting someone in Korean. **New to it** gets two short speaking goals, **Know a little** gets three familiar conversational goals, and **Comfortable speaking** gets four more challenging goals. The model also writes the grading criteria and hints for each goal. The agenda is stable for the call so the progress and recap refer to the same goals.
 
+Select **Try a speaking challenge** after completing the lesson. The two-turn exchange orientation roleplay reuses the lesson's speaking goals and prioritizes one where you needed help. Jiwon gives feedback and shows example answers after both turns.
+
 For a local production build, run `npm run build` and open [http://127.0.0.1:8787](http://127.0.0.1:8787) with the lesson server running.
 
 ## Voice lessons
@@ -49,5 +51,6 @@ The server caches accepted turns so a retry leaves progress consistent. The in-m
 3. Try the phrase. If Jiwon just modelled it, she asks you to recall it on the next prompt.
 4. Follow the generated introduction prompt. For example, say 제 이름은 제레미예요 if she asks for your name.
 5. Show the **2 of 2** recap and the goal where you asked for help.
+6. Select **Try a speaking challenge**, complete the two roleplay turns, and show the evidence and examples in the results. Return to the original lesson recap.
 
 `npm run test:lesson` exercises the lesson flow with simulated Inworld and ElevenLabs responses. `npm run build` checks TypeScript and the bundle. Before presenting, try the walkthrough in a browser with the real microphone and both providers configured.

@@ -2,6 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { pcmSampleRate } from '../../src/lesson/lesson-contract.ts';
 import type { LevelId, TutorReply } from '../../src/lesson/lesson-contract.ts';
 import { assessmentInstructions, assessmentSchema, readAssessment } from './assessment.ts';
+import {
+  challengeAssessmentInstructions, challengeAssessmentSchema, challengeScenarioInstructions,
+  challengeScenarioSchema, readChallengeAssessment, readChallengeScenario,
+} from './challenge.ts';
+import type { ChallengeAssessment, ChallengeContext, ChallengeGoals, ChallengeScenario } from './challenge.ts';
 import { planInstructions, planSchema, readLessonPlan } from './lessonPlan.ts';
 import type { LessonGoal, LessonPlan } from './lessonPlan.ts';
 import type { Assessment } from './session.ts';
@@ -43,11 +48,26 @@ const planTool = {
   description: 'Provide a level-appropriate speaking agenda for this lesson. Call this exactly once.',
   parameters: planSchema,
 };
+const challengePlanTool = {
+  type: 'function',
+  name: 'plan_speaking_challenge',
+  description: 'Provide the opening and two ordered cues for the orientation roleplay.',
+  parameters: challengeScenarioSchema,
+};
+const challengeAssessmentTool = {
+  type: 'function',
+  name: 'assess_challenge_turn',
+  description: 'Assess the latest roleplay attempt and quote the learner when demonstrated.',
+  parameters: challengeAssessmentSchema,
+};
+type FunctionTool = { type: string; name: string; description: string; parameters: object };
 const audioChunkBytes = pcmSampleRate * 2 / 10;
 
 export type RealtimeRoom = {
   plan(level: LevelId): Promise<LessonPlan>;
   evaluate(audio: Uint8Array, context: TurnContext): Promise<{ transcript: string; result: Assessment | null }>;
+  planChallenge(level: LevelId, goals: ChallengeGoals): Promise<ChallengeScenario>;
+  assessChallenge(audio: Uint8Array, context: ChallengeContext): Promise<{ transcript: string; result: ChallengeAssessment | null }>;
 };
 
 export type RealtimeProvider = {
@@ -115,14 +135,14 @@ function transcribe(socket: WebSocket, signal: AbortSignal, audio: Uint8Array) {
 }
 
 async function requestTool<T>(
-  socket: WebSocket, signal: AbortSignal, tool: typeof assessmentTool | typeof planTool,
+  socket: WebSocket, signal: AbortSignal, tool: FunctionTool,
   instructions: string, maxTokens: number, parse: (output: string) => T,
 ) {
   const requestId = randomUUID();
   let responseId: string | undefined;
   let toolCall: { id: string; result: T } | undefined;
   const call = await exchange(socket, signal, (event) => {
-    if (event.type === 'response.created' && event.response?.metadata?.request_id === requestId) {
+    if (event.type === 'response.created' && event.response && event.response.metadata?.request_id === requestId) {
       responseId = event.response.id;
     }
     if (!responseId) return;
@@ -222,6 +242,19 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
             'Call assess_speaking_goal for the most recent learner audio item. Earlier turns are context only.',
             JSON.stringify({ ...context, transcript }),
           ].join('\n'), 350, readAssessment) : null;
+          return { transcript, result };
+        }),
+        planChallenge: (level, goals) => run((connected) => requestTool(
+          connected, signal, challengePlanTool, challengeScenarioInstructions(level, goals),
+          700, (output) => readChallengeScenario(output, goals),
+        )),
+        assessChallenge: (audio, { goal, cue, level }) => run(async (connected) => {
+          const transcript = await transcribe(connected, signal, audio);
+          const result = transcript ? await requestTool(
+            connected, signal, challengeAssessmentTool,
+            challengeAssessmentInstructions + '\n' + JSON.stringify({ level, criterion: goal.criterion, cue, transcript }),
+            220, readChallengeAssessment,
+          ) : null;
           return { transcript, result };
         }),
       };

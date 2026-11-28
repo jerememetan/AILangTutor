@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { koreanTutorId, levelIds, maxPcmBytes, minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
-import type { LevelId, Recap, SessionView } from '../../src/lesson/lesson-contract.ts';
+import type {
+  ChallengeTaskResult, ChallengeTurn, ChallengeView, LevelId, Recap, SessionView,
+} from '../../src/lesson/lesson-contract.ts';
+import { challengeCueReply, challengeSummary, decideChallengeAttempt, pickChallengeGoals } from './challenge.ts';
+import type { ChallengeGoals, ChallengeScenario } from './challenge.ts';
 import type { SpokenReply, TutorVoice } from './elevenLabsVoice.ts';
 import { applyTurn, currentGoal, newProgress } from './session.ts';
 import type { LessonTurn, Progress } from './session.ts';
@@ -21,6 +25,15 @@ type PcmReply = {
   done: boolean;
 };
 type ReplyAudio = { reply: SpokenReply; pcm?: PcmReply };
+type OpenChallengeView = Exclude<ChallengeView, { status: 'ended' }>;
+type ChallengeSession = {
+  goals: ChallengeGoals;
+  scenario: ChallengeScenario;
+  latest: OpenChallengeView;
+  firstResult?: ChallengeTaskResult;
+  turnResults: Map<string, OpenChallengeView>;
+  pendingTurn: boolean;
+};
 type Session = {
   id: string;
   owner: string;
@@ -36,6 +49,8 @@ type Session = {
   lastActivity: number;
   controller: AbortController;
   room: RealtimeRoom;
+  challenge?: ChallengeSession | null;
+  challengeStart?: Promise<ChallengeSession>;
 };
 
 const json = (data: unknown, status = 200, headers?: ConstructorParameters<typeof Headers>[0]) => {
@@ -47,7 +62,7 @@ const problem = (status: number, error: string) => json({ error }, status);
 const browserId = (request: Request) => request.headers.get('cookie')?.match(/(?:^|; )verba_lesson=([a-f0-9-]{36})(?:;|$)/i)?.[1];
 const recap = ({ completed, helpByGoal }: Progress): Recap => ({ completed, helpByGoal });
 
-function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>, reply: SpokenReply): SessionView {
+function cacheReply(session: Pick<Session, 'id' | 'audio'>, reply: SpokenReply) {
   const id = randomUUID();
   session.audio.set(id, { reply });
   // Keep the current reply and a few recent replies for replay and network retries.
@@ -55,13 +70,110 @@ function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>,
     const oldest = session.audio.keys().next().value;
     if (oldest) session.audio.delete(oldest);
   }
+  const { english, korean, prompt } = reply;
+  return { reply: { english, korean, prompt }, audioPath: prefix + '/' + session.id + '/audio/' + id };
+}
+
+function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>, reply: SpokenReply): SessionView {
   return {
     ...recap(session.progress),
     agenda: { title: session.plan.title, goals: session.plan.goals.map(({ id, title, practice }) => ({ id, title, practice })) },
     activeGoal: currentGoal(session.plan, session.progress)?.id ?? null,
-    reply: { english: reply.english, korean: reply.korean, prompt: reply.prompt },
-    audioPath: `${prefix}/${session.id}/audio/${id}`,
+    ...cacheReply(session, reply),
   };
+}
+
+function isUsableRecording(file: unknown): file is Blob {
+  return file instanceof Blob && file.type === pcmAudioType &&
+    file.size >= minPcmBytes && file.size <= maxPcmBytes && file.size % 2 === 0;
+}
+
+const endedChallenge: ChallengeView = { status: 'ended' };
+const turnConflict = () => problem(409, 'This challenge turn is no longer active.');
+
+function activeChallengeView(session: Session, turn: ChallengeTurn, reply: SpokenReply): OpenChallengeView {
+  return { status: 'active', turn, ...cacheReply(session, reply) };
+}
+
+async function startChallenge(session: Session) {
+  if (session.challenge === null) return json(endedChallenge);
+  if (session.challenge) return json(session.challenge.latest);
+  if (currentGoal(session.plan, session.progress)) return problem(409, 'Finish the lesson to start the challenge.');
+  session.challengeStart ??= (async () => {
+    const goals = pickChallengeGoals(session.plan, session.progress);
+    const scenario = await session.room.planChallenge(session.level, goals);
+    if (session.ended || session.controller.signal.aborted || session.challenge === null) {
+      throw new Error('Challenge closed during setup.');
+    }
+    const latest = activeChallengeView(session, 1, challengeCueReply(scenario.cues[0], scenario.opening, 'warmly'));
+    const challenge: ChallengeSession = { goals, scenario, latest, turnResults: new Map(), pendingTurn: false };
+    session.challenge = challenge;
+    return challenge;
+  })().finally(() => {
+    session.challengeStart = undefined;
+    session.lastActivity = Date.now();
+  });
+  try {
+    return json((await session.challengeStart).latest);
+  } catch {
+    if (session.ended || session.controller.signal.aborted || session.challenge === null) return turnConflict();
+    return problem(502, 'Jiwon couldn’t prepare the challenge. Try starting it again.');
+  }
+}
+
+async function submitChallengeTurn(request: Request, session: Session) {
+  const form = await request.formData().catch(() => null);
+  const id = form?.get('turnId');
+  const submittedTurn = form?.get('turn');
+  if (typeof id !== 'string' || !token.test(id) || (submittedTurn !== '1' && submittedTurn !== '2')) {
+    return problem(400, 'The challenge turn is invalid.');
+  }
+  const challenge = session.challenge;
+  if (!challenge || session.ended || session.controller.signal.aborted) return turnConflict();
+  const cached = challenge.turnResults.get(id);
+  if (cached) return json(cached);
+  const { latest } = challenge;
+  if (latest.status !== 'active' || String(latest.turn) !== submittedTurn || challenge.pendingTurn) return turnConflict();
+  if (challenge.turnResults.size >= maxTurns) return problem(429, 'This challenge reached its turn limit.');
+  const file = form?.get('audio');
+  if (!isUsableRecording(file)) return problem(415, 'This recording could not be used. Try recording the same turn again.');
+
+  const turn = latest.turn;
+  const goal = challenge.goals[turn - 1];
+  const cue = challenge.scenario.cues[turn - 1];
+  const stillOpen = () => !session.ended && !session.controller.signal.aborted && session.challenge === challenge;
+  challenge.pendingTurn = true;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (!stillOpen()) return turnConflict();
+    const { transcript, result } = await session.room.assessChallenge(bytes, { goal, cue, level: session.level });
+    if (!stillOpen()) return turnConflict();
+    const decision = decideChallengeAttempt(transcript, result);
+    if (decision.kind === 'result') {
+      const outcome = { title: goal.title, outcome: decision.outcome, quote: decision.quote, example: goal.example };
+      if (turn === 1) {
+        challenge.firstResult = outcome;
+        challenge.latest = activeChallengeView(session, 2, challengeCueReply(challenge.scenario.cues[1], 'Thanks.', 'warmly'));
+      } else {
+        if (!challenge.firstResult) throw new Error('The first turn is missing.');
+        const results: [ChallengeTaskResult, ChallengeTaskResult] = [challenge.firstResult, outcome];
+        challenge.latest = { status: 'complete', results, ...cacheReply(session, challengeSummary(results)) };
+      }
+    } else {
+      const lead = decision.kind === 'question'
+        ? 'Try what you remember, or tell me if you’re unsure.'
+        : 'I didn’t catch that clearly. Try recording again.';
+      challenge.latest = activeChallengeView(session, turn, challengeCueReply(cue, lead, 'gently'));
+    }
+    challenge.turnResults.set(id, challenge.latest);
+    return json(challenge.latest);
+  } catch {
+    if (!stillOpen()) return turnConflict();
+    return problem(502, 'The challenge turn couldn’t be processed. Retry this turn.');
+  } finally {
+    challenge.pendingTurn = false;
+    session.lastActivity = Date.now();
+  }
 }
 
 function streamReply(audio: ReplyAudio, voice: TutorVoice, signal: AbortSignal) {
@@ -171,7 +283,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       }
     }
 
-    const match = pathname.match(/^\/api\/lesson\/sessions\/([a-f0-9-]{36})\/(turns|end|audio\/([a-f0-9-]{36}))$/i);
+    const match = pathname.match(/^\/api\/lesson\/sessions\/([a-f0-9-]{36})\/(turns|end|audio\/([a-f0-9-]{36})|challenge\/(?:start|turns|end))$/i);
     const session = match && sessions.get(match[1]);
     if (!session || !owner || owner !== session.owner) {
       return problem(404, 'This lesson is unavailable. Return to the level picker to start again.');
@@ -182,6 +294,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       session.controller.abort();
       session.audio.clear();
       session.turnResults.clear();
+      session.challenge = null;
       return json(recap(session.progress));
     }
     if (session.ended) return problem(409, 'This lesson has ended.');
@@ -190,6 +303,19 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       const audio = session.audio.get(match[3]);
       if (!audio) return problem(404, 'This reply is unavailable.');
       return streamReply(audio, voice, session.controller.signal);
+    }
+
+    if (request.method === 'POST') {
+      switch (match[2]) {
+        case 'challenge/start':
+          return startChallenge(session);
+        case 'challenge/turns':
+          return submitChallengeTurn(request, session);
+        case 'challenge/end':
+          if (session.challenge === undefined && !session.challengeStart) return turnConflict();
+          session.challenge = null;
+          return json(endedChallenge);
+      }
     }
 
     if (match[2] !== 'turns' || request.method !== 'POST') return problem(405, 'Use a supported lesson action.');
@@ -207,8 +333,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       return problem(409, 'This turn is no longer active.');
     }
     if (session.turnResults.size >= maxTurns) return problem(429, 'This lesson reached its turn limit. Start a new lesson to keep practising.');
-    if (kind === 'speech' && (!(file instanceof Blob) || file.type !== pcmAudioType ||
-      file.size < minPcmBytes || file.size > maxPcmBytes || file.size % 2 !== 0)) {
+    if (kind === 'speech' && !isUsableRecording(file)) {
       return problem(415, 'This recording could not be used. Hold the button while you speak, then try again.');
     }
 

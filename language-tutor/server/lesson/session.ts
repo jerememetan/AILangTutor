@@ -1,4 +1,5 @@
 import type { GoalId, Recap } from '../../src/lesson/lesson-contract.ts';
+import { groundedKoreanQuote } from './assessment.ts';
 import type { SpokenReply } from './elevenLabsVoice.ts';
 import type { LessonPlan } from './lessonPlan.ts';
 
@@ -24,8 +25,6 @@ export function newProgress(): Progress {
   return { completed: [], helpByGoal: {}, recallRequired: false };
 }
 
-const normalize = (line: string) => line.normalize('NFC').trim().replace(/\s+/gu, ' ');
-
 export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn): { progress: Progress; reply: SpokenReply } {
   const goal = currentGoal(plan, progress);
   if (!goal || goal.id !== turn.goal || progress.completed.some((item) => item.turnId === turn.id)) {
@@ -45,11 +44,8 @@ export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn
   }
 
   const result = turn.result;
-  const quote = normalize(result?.evidence ?? '');
-  if (
-    result?.verdict === 'demonstrated' && /\p{Script=Hangul}/u.test(quote) &&
-    normalize(turn.transcript).includes(quote)
-  ) {
+  const quote = result?.verdict === 'demonstrated' && groundedKoreanQuote(turn.transcript, result.evidence);
+  if (result?.verdict === 'demonstrated' && quote) {
     if (progress.recallRequired) {
       return {
         progress: { ...progress, recallRequired: false },

@@ -1,5 +1,12 @@
 import type { Assessment } from './session.ts';
 
+const normalize = (text: string) => text.normalize('NFC').trim().replace(/\s+/gu, ' ');
+
+export function groundedKoreanQuote(transcript: string, evidence: string | null): string | null {
+  const quote = normalize(evidence ?? '');
+  return /\p{Script=Hangul}/u.test(quote) && normalize(transcript).includes(quote) ? quote : null;
+}
+
 export const assessmentSchema = {
   type: 'object',
   additionalProperties: false,

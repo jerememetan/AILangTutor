@@ -26,3 +26,17 @@ export type SessionView = Recap & {
 };
 
 export type OpenLesson = { sessionId: string; view: SessionView };
+
+export type ChallengeTurn = 1 | 2;
+export type ChallengeTaskResult = {
+  title: string;
+  outcome: 'independent' | 'practice';
+  quote: string | null;
+  example: string;
+};
+
+type ChallengeMedia = { reply: TutorReply; audioPath: string };
+export type ChallengeView =
+  | (ChallengeMedia & { status: 'active'; turn: ChallengeTurn })
+  | (ChallengeMedia & { status: 'complete'; results: [ChallengeTaskResult, ChallengeTaskResult] })
+  | { status: 'ended' };
