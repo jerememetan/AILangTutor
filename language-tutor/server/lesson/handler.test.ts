@@ -172,7 +172,7 @@ type ClientEvent = {
     model: string;
     output_modalities: string[];
     text_generation_config?: { reasoning: { effort: string } };
-    audio: { input: { turn_detection: unknown }; output?: unknown };
+    audio: { input: { turn_detection: unknown; transcription: { prompts: string[] } }; output?: unknown };
     providerData: { auto_tool_response: boolean };
   };
   response?: {
@@ -328,7 +328,7 @@ test('the same Inworld room plans a lesson and a challenge and assesses the late
   }
 });
 
-test('retries Chinese or Japanese script as Korean while preserving English questions', async () => {
+test('retries unexpected script as Korean and only assesses usable transcripts', async () => {
   const controller = new AbortController();
   const audio = new Uint8Array(minPcmBytes).fill(42);
   const attempts = [
@@ -336,18 +336,25 @@ test('retries Chinese or Japanese script as Korean while preserving English ques
     { automatic: 'こんにちは', expected: clips.name, retry: Response.json({ transcription: { transcript: clips.name } }) },
     { automatic: clips.help, expected: clips.help },
     { automatic: clips.greeting, expected: clips.greeting },
-    { automatic: '你好', expected: '你好', retry: new Response(null, { status: 503 }) },
-    { automatic: 'こんにちは', expected: 'こんにちは', retry: Response.json({ transcription: { transcript: '  ' } }) },
+    { automatic: '你好', expected: '', retry: new Response(null, { status: 503 }) },
+    { automatic: 'こんにちは', expected: '', retry: Response.json({ transcription: { transcript: '  ' } }) },
+    { automatic: '안녕 你好', expected: clips.greeting, retry: Response.json({ transcription: { transcript: clips.greeting } }) },
+    { automatic: 'こんにちは', expected: '', retry: Response.json({ transcription: { transcript: 'こんにちは' } }) },
   ];
   let turnIndex = 0;
   const retryRequests: unknown[] = [];
+  const graded: number[] = [];
   const provider = createRealtimeProvider(
     { INWORLD_API_KEY: 'fake' },
     () => new FakeInworldSocket((socket, event) => {
-      if (event.type === 'session.update') socket.emit({ type: 'session.updated' });
       const attempt = attempts[turnIndex];
+      if (event.type === 'session.update') {
+        assert.deepEqual(event.session?.audio.input.transcription.prompts, ['안녕하세요', '한글']);
+        socket.emit({ type: 'session.updated' });
+      }
       if (event.type === 'input_audio_buffer.commit') sendTranscript(socket, attempt.automatic);
       if (event.type !== 'response.create') return;
+      graded.push(turnIndex);
       const context = event.response?.instructions.split('\n').at(-2);
       assert.equal(JSON.parse(context ?? '{}').transcript, attempt.expected);
       const name = event.response?.tools?.[0].name;
@@ -377,9 +384,10 @@ test('retries Chinese or Japanese script as Korean while preserving English ques
           goal, level: 'beginner', previousReply: { english: '', korean: null, prompt: 'Try a greeting.' },
         });
       assert.equal(turn.transcript, expected);
-      assert.equal(turn.result?.evidence, expected);
+      assert.equal(turn.result?.evidence, expected || undefined);
     }
-    assert.deepEqual(retryRequests, [0, 1, 4, 5].map((index) => ({
+    assert.deepEqual(graded, [0, 1, 2, 3, 6]);
+    assert.deepEqual(retryRequests, [0, 1, 4, 5, 6, 7].map((index) => ({
       turnIndex: index,
       url: 'https://api.inworld.ai/stt/v1/transcribe',
       method: 'POST',

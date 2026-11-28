@@ -45,6 +45,7 @@ const connectSocket: ConnectSocket = (url, headers) => {
 
 const pcm = { type: 'audio/pcm', rate: pcmSampleRate };
 const sttModel = 'inworld/inworld-stt-1';
+const vocabulary = ['안녕하세요', '한글'];
 const hangul = /\p{Script=Hangul}/u;
 const hanOrKana = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const assessmentTool = {
@@ -253,15 +254,15 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
     output_modalities: ['text'],
     max_output_tokens: 350,
     audio: {
-      input: { format: pcm, transcription: { model: sttModel }, turn_detection: null },
+      input: { format: pcm, transcription: { model: sttModel, prompts: vocabulary }, turn_detection: null },
     },
-    providerData: { auto_tool_response: false, stt: { language_hints: ['ko-KR', 'en-US'] } },
+    providerData: { auto_tool_response: false },
   };
 
   async function transcribeLearner(socket: WebSocket, signal: AbortSignal, audio: Uint8Array) {
     const transcript = await transcribe(socket, signal, audio);
-    // Auto-detection still handles English help requests. Retry only a likely Korean script mismatch.
-    if (hangul.test(transcript) || !hanOrKana.test(transcript)) return transcript;
+    // Keep auto-detection for bilingual conversation, but recheck unexpected script before grading.
+    if (!hanOrKana.test(transcript)) return transcript;
     try {
       const response = await fetcher('https://api.inworld.ai/stt/v1/transcribe', {
         method: 'POST',
@@ -281,15 +282,14 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
       if (response.ok) {
         const retry = (await response.json())?.transcription?.transcript;
         const korean = typeof retry === 'string' ? retry.trim().slice(0, 1500) : '';
-        if (hangul.test(korean)) return korean;
+        if (hangul.test(korean) && !hanOrKana.test(korean)) return korean;
       } else {
         await response.body?.cancel();
       }
     } catch {
-      // A failed secondary transcription leaves the original turn usable.
       signal.throwIfAborted();
     }
-    return transcript;
+    return '';
   }
 
   return {

@@ -113,7 +113,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
             <p className="lesson-transcript" aria-live="polite">
               <strong>I heard</strong> {transcript
                 ? <q dir="auto"><KoreanReading text={transcript} /></q>
-                : <span>No words detected</span>}
+                : <span>Couldn’t transcribe that clearly</span>}
             </p>
           )}
           <div className="lesson-dock">
