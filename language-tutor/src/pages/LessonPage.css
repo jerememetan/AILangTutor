@@ -109,6 +109,16 @@
 }
 .lesson-captions p { margin: 0; font-size: 14px; line-height: 1.45; }
 .lesson-captions .lesson-hangul { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
+.lesson-transcript {
+  margin: 0;
+  padding: 9px 19px;
+  border-bottom: 1px solid var(--room-line);
+  color: var(--room-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.lesson-transcript strong { margin-inline-end: 5px; color: var(--room-ink); }
 
 .lesson-dock, .lesson-turn {
   display: flex;

@@ -23,6 +23,7 @@ export type SessionView = Recap & {
   activeGoal: GoalId | null;
   reply: TutorReply;
   audioPath: string;
+  transcript?: string | null;
 };
 
 export type OpenLesson = { sessionId: string; view: SessionView };
@@ -35,7 +36,7 @@ export type ChallengeTaskResult = {
   example: string;
 };
 
-type ChallengeMedia = { reply: TutorReply; audioPath: string };
+type ChallengeMedia = { reply: TutorReply; audioPath: string; transcript?: string | null };
 export type ChallengeView =
   | (ChallengeMedia & { status: 'active'; turn: ChallengeTurn })
   | (ChallengeMedia & { status: 'complete'; results: [ChallengeTaskResult, ChallengeTaskResult] })
