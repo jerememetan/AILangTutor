@@ -1,28 +1,45 @@
-# Verba — speaking-first language tutor
+# Verba
 
-An early browser prototype for a language-learning app built around live conversation with an animated tutor. The lesson room is designed like a video call and keeps a teach-style lesson plan visible beside the conversation.
+Verba is a speaking-first language tutor. The hackathon lesson pairs the learner with Han Jiwon for a Korean introduction in a waist-up avatar call. The roster includes four other tutor previews.
 
-## Start locally
+## Run the lesson locally
 
-```bash
-npm install
+Use Node.js 22.20 or newer. Run these commands from `language-tutor/`.
+
+```powershell
+npm ci
+if (-not (Test-Path .env.lesson.local)) { Copy-Item .env.example .env.lesson.local }
+```
+
+Fill in `.env.lesson.local` and start both processes in separate terminals.
+
+```powershell
+npm run dev:lesson
 npm run dev
 ```
 
-## Current prototype
+Open the Vite URL. Choose **Han Jiwon**, select **New to it**, and start the lesson. Turn on the mic, hold **Push to speak**, and release to send. You can also hold Space or Enter while the button has focus. If the browser blocks the first reply, select **Play tutor audio**.
 
-- Full-screen tutor picker with side arrows and keyboard navigation across five languages.
-- Level selection before a lesson.
-- A video-call-style Korean lesson room with captions, call controls, a learner goal, and a step-by-step lesson agenda.
-- Lesson checklist interaction to preview progress through the teaching plan.
+For a local production build, run `npm run build` and open [http://127.0.0.1:8787](http://127.0.0.1:8787) with the lesson server running.
 
-The tutor characters are temporary animated placeholders. The Korean tutor stage is configured to load `/avatars/vita.vrm` when that licensed file is added under `public/avatars/`; no VRM assets are included yet. The starter renderer includes idle motion and a simple speaking mouth animation, but mouth movement is not synchronized to audio yet.
+## Add the provider credentials
 
-## Planned integration seams
+The example file lists the required variables. The server loads the local file and keeps keys out of the browser and Git.
 
-- **OpenAI:** adaptive teaching loop, lesson planning, corrections, and learner progress.
-- **Inworld:** tutor character orchestration, conversational state, and/or real-time speech components.
-- **ElevenLabs:** tutor voice generation and streaming.
-- **VRM runtime:** render the rigged tutor and drive facial/body animation from speech and tutor state.
+| Provider | Variables | Role |
+| --- | --- | --- |
+| Inworld | `INWORLD_API_KEY` | Transcribes each submitted clip. Use the Base64 API credential for Inworld Basic authentication. |
+| OpenAI | `OPENAI_API_KEY`, optional `OPENAI_LESSON_MODEL` | Evaluates the transcript against the active goal and writes short English coaching with Korean examples. The default model is `gpt-4o-mini`. |
+| ElevenLabs | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` | Speaks the English guidance and Korean phrases with a multilingual voice. Choose a voice you can preview in both languages. |
 
-Keep provider keys on a server-side API, never in `VITE_*` client variables. Check hackathon rules and each model's license before bundling or redistributing a VRM.
+The implementation lives in `server/lesson/providers.ts`. `server/lesson/handler.ts` runs transcription, assessment, and progress updates in order. It caches accepted turns so a retry leaves progress consistent. The mouth animation follows the amplitude of actual tutor playback. The in-memory session lasts for one run and refresh starts a new lesson.
+
+## Judge walkthrough
+
+1. Open the beginner lesson and ask “How do I say hello politely?”
+2. Hear Jiwon explain in English and say 안녕하세요. The goal stays at **0 of 3**.
+3. Try the phrase. If Jiwon just modelled it, she asks you to repeat it from memory on the next prompt.
+4. Introduce yourself with 제 이름은 제레미예요 and ask Jiwon’s name with 이름이 뭐예요? Use one turn for each goal.
+5. Show the **3 of 3** recap and the goal where you asked for help.
+
+`npm run test:lesson` exercises the session and provider request formats with simulated provider responses. `npm run build` checks TypeScript and the bundle. Before presenting, try the walkthrough in a browser with the real microphone and configured provider accounts.
