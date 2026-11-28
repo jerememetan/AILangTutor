@@ -3,64 +3,99 @@ import { maxPcmBytes, maxRecordingMs, minPcmBytes } from './lesson-contract';
 import { capturePcm } from './capturePcm';
 
 const stopTracks = (stream?: MediaStream) => stream?.getTracks().forEach((track) => track.stop());
+const enableTracks = (stream: MediaStream | undefined, active: boolean) =>
+  stream?.getAudioTracks().forEach((track) => { track.enabled = active; });
 const constraints = { audio: { echoCancellation: true, noiseSuppression: true }, video: false };
 
-type Capture = {
+type Take = { timer?: number; finishing?: boolean };
+type Microphone = {
+  context: AudioContext;
   stream?: MediaStream;
-  context?: AudioContext;
-  stop?: () => void;
-  timer?: number;
-  finishing?: boolean;
+  recorder?: Awaited<ReturnType<typeof capturePcm>>;
+  take?: Take;
 };
 
 export function useLearnerAudio(submit: (blob: Blob) => void) {
   const [armed, setArmed] = useState(false);
   const [status, setStatus] = useState<'idle' | 'permission' | 'starting' | 'recording' | 'finishing'>('idle');
   const [error, setError] = useState('');
-  const enabled = useRef(false);
-  const permission = useRef<AbortController | null>(null);
-  const capture = useRef<Capture | null>(null);
+  const [inputLevel, setInputLevel] = useState(0);
+  const mic = useRef<Microphone | null>(null);
+  const onSubmit = useRef(submit);
+
+  useEffect(() => { onSubmit.current = submit; }, [submit]);
 
   const finish = useCallback((cancel = false) => {
-    const turn = capture.current;
-    if (!turn || (turn.finishing && !cancel)) return;
-    window.clearTimeout(turn.timer);
-    if (cancel || !turn.stop) {
-      capture.current = null;
-      stopTracks(turn.stream);
-      if (turn.context) void turn.context.close().catch(() => {});
+    const device = mic.current;
+    const take = device?.take;
+    const recorder = device?.recorder;
+    if (!device || !take || !recorder || (take.finishing && !cancel)) return;
+    if (cancel || take.timer === undefined) {
+      device.take = undefined;
+      recorder.cancel();
+      enableTracks(device.stream, false);
+      window.clearTimeout(take.timer);
+      setInputLevel(0);
       setStatus('idle');
+      if (!cancel) setError('The microphone was still opening. Hold until Recording appears, then speak.');
       return;
     }
-    turn.finishing = true;
+
+    take.finishing = true;
+    window.clearTimeout(take.timer);
+    setInputLevel(0);
     setStatus('finishing');
-    turn.stop();
+    const clip = recorder.finish();
+    enableTracks(device.stream, false);
+    void clip.then((blob) => {
+      if (device.take !== take) return;
+      device.take = undefined;
+      setStatus('idle');
+      if (blob.size < minPcmBytes || blob.size > maxPcmBytes) {
+        setError('That recording was too short. Hold while speaking, then release to send.');
+        return;
+      }
+      onSubmit.current(blob);
+    }, () => {
+      if (device.take !== take) return;
+      device.take = undefined;
+      setStatus('idle');
+      setError('Recording could not finish. Hold the button to try again.');
+    });
   }, []);
 
+  const cancelHold = useCallback(() => {
+    if (!mic.current?.take?.finishing) finish(true);
+  }, [finish]);
+
   const cancel = useCallback(() => {
-    permission.current?.abort();
-    permission.current = null;
-    enabled.current = false;
-    finish(true);
+    const device = mic.current;
+    if (device) {
+      finish(true);
+      mic.current = null;
+      device.recorder?.dispose();
+      stopTracks(device.stream);
+      void device.context.close().catch(() => {});
+    }
     setArmed(false);
+    setInputLevel(0);
     setStatus('idle');
   }, [finish]);
 
   useEffect(() => {
-    const cancelOnBlur = () => finish(true);
-    const onVisibility = () => { if (document.hidden) cancelOnBlur(); };
-    window.addEventListener('blur', cancelOnBlur);
+    const onVisibility = () => { if (document.hidden) cancelHold(); };
+    window.addEventListener('blur', cancelHold);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      window.removeEventListener('blur', cancelOnBlur);
+      window.removeEventListener('blur', cancelHold);
       document.removeEventListener('visibilitychange', onVisibility);
       cancel();
     };
-  }, [cancel, finish]);
+  }, [cancel, cancelHold]);
 
   async function toggle() {
     setError('');
-    if (enabled.current || permission.current) {
+    if (mic.current) {
       cancel();
       return;
     }
@@ -69,77 +104,71 @@ export function useLearnerAudio(submit: (blob: Blob) => void) {
       setError('Audio recording is unavailable here. Open the lesson in a supported browser on localhost or HTTPS.');
       return;
     }
-    const request = new AbortController();
-    permission.current = request;
-    setStatus('permission');
+
+    let device: Microphone | undefined;
     try {
-      stopTracks(await navigator.mediaDevices.getUserMedia(constraints));
-      if (request.signal.aborted) return;
-      enabled.current = true;
-      setArmed(true);
-    } catch {
-      if (!request.signal.aborted) setError('Allow microphone access in your browser, then turn the mic on again.');
-    } finally {
-      if (permission.current === request) {
-        permission.current = null;
-        setStatus('idle');
+      device = { context: new AudioContext() };
+      const opened = device;
+      mic.current = opened;
+      setStatus('permission');
+      const resumed = opened.context.resume().then(() => true, () => false);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      enableTracks(stream, false);
+      if (mic.current !== opened) {
+        stopTracks(stream);
+        return;
       }
+      opened.stream = stream;
+      stream.getAudioTracks().forEach((track) => track.addEventListener('ended', () => {
+        if (mic.current !== opened) return;
+        cancel();
+        setError('The microphone was disconnected. Reconnect it and turn the mic on again.');
+      }, { once: true }));
+      const recorder = await capturePcm(opened.context, stream, (peak) => {
+        if (mic.current === opened && opened.take && !opened.take.finishing) setInputLevel(peak);
+      });
+      if (mic.current !== opened) {
+        recorder.dispose();
+        return;
+      }
+      opened.recorder = recorder;
+      if (!await resumed) throw new Error('Microphone audio context did not start.');
+      if (mic.current !== opened) return;
+      setArmed(true);
+      setStatus('idle');
+    } catch (reason) {
+      if (device && mic.current !== device) return;
+      cancel();
+      const denied = reason instanceof DOMException && reason.name === 'NotAllowedError';
+      setError(denied
+        ? 'Allow microphone access in your browser, then turn the mic on again.'
+        : 'The microphone could not start. Check your input device, then turn the mic on again.');
     }
   }
 
   async function start() {
-    if (!enabled.current || capture.current) return;
+    const device = mic.current;
+    const recorder = device?.recorder;
+    if (!device || !recorder || device.take) return;
     setError('');
-    const turn: Capture = {};
-    capture.current = turn;
-    setStatus('starting');
+    const take: Take = {};
+    device.take = take;
     try {
-      const context = new AudioContext();
-      turn.context = context;
-      void context.resume().catch(() => {});
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      if (capture.current !== turn) {
-        stopTracks(stream);
-        return;
+      if (device.context.state !== 'running') {
+        setStatus('starting');
+        await device.context.resume();
       }
-      turn.stream = stream;
-      stream.getAudioTracks().forEach((track) => track.addEventListener('ended', () => {
-        if (capture.current !== turn) return;
-        finish(true);
-        setError('The microphone was disconnected. Reconnect it and try again.');
-      }, { once: true }));
-      const complete = (blob: Blob) => {
-        if (capture.current !== turn) return;
-        capture.current = null;
-        stopTracks(stream);
-        void context.close().catch(() => {});
-        setStatus('idle');
-        if (blob.size < minPcmBytes || blob.size > maxPcmBytes) {
-          setError('That recording could not be used. Hold to try again.');
-          return;
-        }
-        submit(blob);
-      };
-
-      const finishPcm = await capturePcm(context, stream);
-      if (capture.current !== turn) return;
-      turn.stop = () => {
-        const pending = finishPcm();
-        stopTracks(stream);
-        void pending.then(complete, () => {
-          if (capture.current !== turn) return;
-          finish(true);
-          setError('That recording could not be used. Hold to try again.');
-        });
-      };
+      if (device.take !== take) return;
+      recorder.start();
+      enableTracks(device.stream, true);
+      take.timer = window.setTimeout(() => finish(), maxRecordingMs);
       setStatus('recording');
-      turn.timer = window.setTimeout(() => finish(), maxRecordingMs);
     } catch {
-      if (capture.current !== turn) return;
+      if (device.take !== take) return;
       finish(true);
-      setError('Recording could not start. Check the microphone and hold to try again.');
+      setError('Recording could not start. Turn the mic off and back on to try again.');
     }
   }
 
-  return { armed, status, error, toggle, start, finish, cancel };
+  return { armed, status, error, inputLevel, toggle, start, finish, cancel, cancelHold };
 }

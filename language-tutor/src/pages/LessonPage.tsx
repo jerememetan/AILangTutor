@@ -107,7 +107,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           )}
           <div className="lesson-dock">
             <button type="button" className="lesson-control" aria-pressed={mic.armed}
-              disabled={!canCapture || Boolean(recap)} onClick={() => void mic.toggle()}>
+              disabled={(!canCapture && !mic.armed) || Boolean(recap)} onClick={() => void mic.toggle()}>
               {mic.armed ? <Mic size={19} /> : <MicOff size={19} />}
               <span>{mic.armed ? 'Mic on' : mic.status === 'permission' ? 'Opening…' : 'Mic off'}</span>
             </button>
@@ -139,7 +139,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
                     void mic.start();
                   }}
                   onPointerUp={() => mic.finish()}
-                  onPointerCancel={() => mic.finish(true)}
+                  onPointerCancel={mic.cancelHold}
                   onLostPointerCapture={() => { if (holding) mic.finish(); }}
                   onKeyDown={(event) => {
                     if (event.key !== ' ' && event.key !== 'Enter') return;
@@ -151,8 +151,12 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
                     event.preventDefault();
                     mic.finish();
                   }}
-                  onBlur={() => mic.finish(true)}
-                ><Mic size={18} aria-hidden="true" />{holding ? 'Release to send' : 'Push to speak'}</button>
+                  onBlur={mic.cancelHold}
+                ><Mic size={18} aria-hidden="true" />{mic.status === 'starting' ? 'Opening microphone…' : holding ? 'Release to send' : 'Push to speak'}</button>
+              )}
+              {mic.status === 'recording' && (
+                <meter className="lesson-input-level" min={0} max={1} value={Math.min(mic.inputLevel * 6, 1)}
+                  aria-label="Microphone input level" />
               )}
               {(tutorAudio.status === 'blocked' || tutorAudio.status === 'error') && (
                 <button type="button" className="lesson-secondary" disabled={capturing || pending} onClick={tutorAudio.play}>
@@ -160,6 +164,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
                 </button>
               )}
               {canCapture && !mic.armed && !message && <small>Turn on your mic to speak.</small>}
+              {canCapture && mic.armed && (speaking || loadingAudio) && !message && <small>Speak when Jiwon finishes.</small>}
               {message && <p className="lesson-error" role="alert">{message}</p>}
               {session.error && (!view || session.failedAction) && (
                 <button type="button" className="lesson-secondary" onClick={session.retry}>

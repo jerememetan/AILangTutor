@@ -162,6 +162,7 @@
   user-select: none;
 }
 .lesson-push.is-recording { background: #963d46; }
+.lesson-input-level { width: 70px; height: 12px; }
 .lesson-push:not(:disabled):hover, .lesson-secondary:not(:disabled):hover { border-color: #aabaff; }
 .lesson-room button:disabled { cursor: default; opacity: .56; }
 .lesson-room :is(a, button):focus-visible { outline: 2px solid #beccff; outline-offset: 3px; }
