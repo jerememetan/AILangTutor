@@ -146,11 +146,12 @@ function challengeRequest(session: TestSession, action: string, body?: FormData)
   });
 }
 
-function challengeTurn(session: TestSession, number: ChallengeTurn, answer?: string, id = randomUUID()) {
+function challengeTurn(session: TestSession, number: ChallengeTurn, answer?: string, id: string = randomUUID(), skip = false) {
   const body = new FormData();
   body.set('turnId', id);
   body.set('turn', String(number));
   if (answer !== undefined) body.set('audio', transcriptAudio(answer), 'answer');
+  if (skip) body.set('kind', 'skip');
   return challengeRequest(session, 'turns', body);
 }
 
@@ -408,7 +409,7 @@ test('retries unexpected script as Korean and only assesses usable transcripts',
   }
 });
 
-test('the optional challenge prioritizes earlier help and reveals results after two accepted turns', async () => {
+test('the challenge keeps missed prompts active and reports a skipped skill accurately', async () => {
   let planned = 0;
   let assessments = 0;
   let voiceCalls = 0;
@@ -440,6 +441,7 @@ test('the optional challenge prioritizes earlier help and reveals results after 
   assert.equal(first.turn, 1);
   assert.equal('results' in first, false);
   assert.equal((await handler(challengeTurn(session, 1))).status, 415);
+  assert.equal((await handler(challengeTurn(session, 1, undefined, randomUUID(), true))).status, 400);
   assert.equal(assessments, 0);
   const answer = async (number: ChallengeTurn, speech: string, id?: string) => {
     const response = await handler(challengeTurn(session, number, speech, id));
@@ -467,13 +469,26 @@ test('the optional challenge prioritizes earlier help and reveals results after 
   assert.deepEqual(await answer(1, '안녕하십니까', id), second);
   assert.equal(assessments, 4);
   const finalId = randomUUID();
-  const final = await answer(2, "I don't know", finalId);
+  const missed = await answer(2, "I don't know", finalId);
+  assert.equal(missed.status, 'active');
+  assert.equal(missed.turn, 2);
+  assert.equal(missed.canSkip, true);
+  assert.equal('results' in missed, false);
+  assert.deepEqual(await answer(2, "I don't know", finalId), missed);
+  const skipId = randomUUID();
+  const skip = async (): Promise<ChallengeView> => {
+    const response = await handler(challengeTurn(session, 2, undefined, skipId, true));
+    assert.ok(response.ok);
+    return response.json();
+  };
+  const final = await skip();
   assert.equal(final.status, 'complete');
   assert.deepEqual(final.results.map(({ outcome }) => outcome), ['independent', 'practice']);
   assert.equal(final.results[0].quote, '안녕하십니까');
   assert.equal(final.results[1].quote, null);
   assert.ok(final.results[1].example);
-  assert.deepEqual(await answer(2, "I don't know", finalId), final);
+  assert.match(final.reply.english, /1 out of 2/);
+  assert.deepEqual(await skip(), final);
   assert.deepEqual(await begin(), final);
   for (let replay = 0; replay < 2; replay++) {
     const response = await handler(new Request(new URL(final.audioPath, base), { headers: { Cookie: session.cookie } }));
@@ -487,6 +502,22 @@ test('the optional challenge prioritizes earlier help and reveals results after 
   assert.deepEqual(recap, { completed: snapshot.completed, helpByGoal: snapshot.helpByGoal });
 });
 
+test('a correct retry of the final challenge prompt demonstrates both skills', async () => {
+  const handler = createLessonHandler(fixtureProvider(), fixtureVoice);
+  const session = await enter(handler);
+  await finishLesson(handler, session);
+  assert.ok((await handler(challengeRequest(session, 'start'))).ok);
+  assert.ok((await handler(challengeTurn(session, 1, clips.greeting))).ok);
+  const missed: ChallengeView = await handler(challengeTurn(session, 2, "I don't know")).then((r) => r.json());
+  assert.equal(missed.status, 'active');
+  assert.equal(missed.turn, 2);
+  const retried: ChallengeView = await handler(challengeTurn(session, 2, clips.name)).then((r) => r.json());
+  assert.equal(retried.status, 'complete');
+  assert.deepEqual(retried.results.map(({ outcome, quote }) => ({ outcome, quote })), [
+    { outcome: 'independent', quote: clips.greeting },
+    { outcome: 'independent', quote: clips.name },
+  ]);
+});
 test('challenge setup and speech retry after provider errors, and closing discards late assessments', async () => {
   let plans = 0;
   let assessments = 0;

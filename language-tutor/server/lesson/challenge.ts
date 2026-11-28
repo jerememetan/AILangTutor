@@ -121,13 +121,13 @@ export function challengeCueReply(cue: ChallengeCue, lead: string, delivery: Spo
 }
 
 export function challengeSummary(results: [ChallengeTaskResult, ChallengeTaskResult]): SpokenReply {
-  const success = results.find(({ outcome }) => outcome === 'independent');
-  const practice = results.find(({ outcome }) => outcome === 'practice');
-  const lead = success
-    ? 'You handled this goal on your own. ' + success.title + '.'
-    : 'Thanks for trying both turns.';
-  const prompt = practice
-    ? 'Here’s a goal to practise again. ' + practice.title + '.'
-    : 'Try these skills the next time you meet someone new.';
-  return { delivery: 'encouraging', english: lead, korean: null, prompt };
+  const demonstrated = results.filter(({ outcome }) => outcome === 'independent').length;
+  return {
+    delivery: 'encouraging',
+    english: demonstrated === results.length
+      ? 'You demonstrated both skills on your own.'
+      : `You demonstrated ${demonstrated} out of ${results.length} skills. Let’s review what to practise.`,
+    korean: null,
+    prompt: demonstrated === results.length ? 'Try these skills the next time you meet someone new.' : '',
+  };
 }

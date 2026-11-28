@@ -27,6 +27,7 @@ type PcmReply = {
 };
 type ReplyAudio = { reply: SpokenReply; pcm?: PcmReply };
 type OpenChallengeView = Exclude<ChallengeView, { status: 'ended' }>;
+type ActiveChallengeView = Extract<ChallengeView, { status: 'active' }>;
 type PendingTurn = { id: string; response: Promise<Response> };
 type ChallengeSession = {
   goals: ChallengeGoals;
@@ -132,7 +133,7 @@ function isUsableRecording(file: unknown): file is Blob {
 const endedChallenge: ChallengeView = { status: 'ended' };
 const turnConflict = () => problem(409, 'This challenge turn is no longer active.');
 
-function activeChallengeView(session: Session, turn: ChallengeTurn, reply: SpokenReply): OpenChallengeView {
+function activeChallengeView(session: Session, turn: ChallengeTurn, reply: SpokenReply): ActiveChallengeView {
   return { status: 'active', turn, ...cacheReply(session, reply), messages: snapshotMessages(session.messages) };
 }
 
@@ -148,6 +149,7 @@ async function startChallenge(session: Session) {
   if (session.challenge === null) return json(endedChallenge);
   if (session.challenge) return json(session.challenge.latest);
   if (currentGoal(session.plan, session.progress)) return problem(409, 'Finish the lesson to start the challenge.');
+  if (session.pendingTurn) return problem(409, 'Wait for Jiwon to finish processing your turn.');
   session.challengeStart ??= (async () => {
     const goals = pickChallengeGoals(session.plan, session.progress);
     const scenario = await session.room.planChallenge(session.level, goals);
@@ -176,7 +178,9 @@ async function submitChallengeTurn(request: Request, session: Session) {
   const form = await request.formData().catch(() => null);
   const id = form?.get('turnId');
   const submittedTurn = form?.get('turn');
-  if (typeof id !== 'string' || !token.test(id) || (submittedTurn !== '1' && submittedTurn !== '2')) {
+  const kind = form?.get('kind');
+  if (typeof id !== 'string' || !token.test(id) || (submittedTurn !== '1' && submittedTurn !== '2') ||
+    (kind !== null && kind !== 'skip')) {
     return problem(400, 'The challenge turn is invalid.');
   }
   const challenge = session.challenge;
@@ -190,16 +194,45 @@ async function submitChallengeTurn(request: Request, session: Session) {
     return json({ error: 'The challenge has moved on. The current turn is ready.', view: latest }, 409);
   }
   if (challenge.turnResults.size >= maxTurns) return problem(429, 'This challenge reached its turn limit.');
+  if (kind === 'skip') {
+    if (!latest.canSkip) return problem(400, 'Attempt this challenge prompt before moving on.');
+    return storeChallengeResult(challenge, id, advanceChallenge(session, challenge, latest.turn, 'practice', null));
+  }
   const file = form?.get('audio');
   if (!isUsableRecording(file)) return problem(415, 'This recording could not be used. Try recording the same turn again.');
 
-  const turn = latest.turn;
-  return processTurn(challenge, id, () => assessChallengeTurn(session, challenge, id, file, turn));
+  return processTurn(challenge, id, () => assessChallengeTurn(session, challenge, id, file, latest));
+}
+
+function storeChallengeResult(challenge: ChallengeSession, id: string, view: OpenChallengeView) {
+  challenge.latest = view;
+  challenge.turnResults.set(id, view);
+  return json(view);
+}
+
+function advanceChallenge(
+  session: Session, challenge: ChallengeSession, turn: ChallengeTurn,
+  outcome: ChallengeTaskResult['outcome'], quote: string | null,
+) {
+  const { title, example } = challenge.goals[turn - 1];
+  const result = { title, outcome, quote, example };
+  if (turn === 1) {
+    challenge.firstResult = result;
+    const reply = challengeCueReply(challenge.scenario.cues[1], 'Here’s the next prompt.', 'warmly');
+    pushTutorMessage(session, reply);
+    return activeChallengeView(session, 2, reply);
+  }
+  if (!challenge.firstResult) throw new Error('The first turn is missing.');
+  const results: [ChallengeTaskResult, ChallengeTaskResult] = [challenge.firstResult, result];
+  const reply = challengeSummary(results);
+  pushTutorMessage(session, reply);
+  return completeChallengeView(session, results, reply);
 }
 
 async function assessChallengeTurn(
-  session: Session, challenge: ChallengeSession, id: string, file: Blob, turn: ChallengeTurn,
+  session: Session, challenge: ChallengeSession, id: string, file: Blob, latest: ActiveChallengeView,
 ) {
+  const { turn } = latest;
   const goal = challenge.goals[turn - 1];
   const cue = challenge.scenario.cues[turn - 1];
   const stillOpen = () => !session.ended && !session.controller.signal.aborted && session.challenge === challenge;
@@ -209,34 +242,21 @@ async function assessChallengeTurn(
     const { transcript, result } = await session.room.assessChallenge(bytes, { goal, cue, level: session.level });
     if (!stillOpen()) return turnConflict();
     const decision = decideChallengeAttempt(transcript, result);
-    if (decision.kind === 'result' && turn !== 1 && !challenge.firstResult) {
-      throw new Error('The first turn is missing.');
-    }
     pushLearnerMessage(session, transcript, 'speech');
-    if (decision.kind === 'result') {
-      const outcome = { title: goal.title, outcome: decision.outcome, quote: decision.quote, example: goal.example };
-      if (turn === 1) {
-        challenge.firstResult = outcome;
-        const reply = challengeCueReply(challenge.scenario.cues[1], 'Thanks.', 'warmly');
-        pushTutorMessage(session, reply);
-        challenge.latest = activeChallengeView(session, 2, reply);
-      } else {
-        const results: [ChallengeTaskResult, ChallengeTaskResult] = [challenge.firstResult!, outcome];
-        const reply = challengeSummary(results);
-        pushTutorMessage(session, reply);
-        challenge.latest = completeChallengeView(session, results, reply);
-      }
-    } else {
-      const lead = decision.kind === 'question'
-        ? 'Try what you remember, or tell me if you’re unsure.'
-        : 'I didn’t catch that clearly. Try recording again.';
-      const reply = challengeCueReply(cue, lead, 'gently');
-      pushTutorMessage(session, reply);
-      challenge.latest = activeChallengeView(session, turn, reply);
+    const heard = transcript.trim() || null;
+    if (decision.kind === 'result' && decision.outcome === 'independent') {
+      const view = advanceChallenge(session, challenge, turn, 'independent', decision.quote);
+      return storeChallengeResult(challenge, id, { ...view, transcript: heard });
     }
-    challenge.latest.transcript = transcript.trim() || null;
-    challenge.turnResults.set(id, challenge.latest);
-    return json(challenge.latest);
+    const lead = decision.kind === 'result' ? 'That answer didn’t meet this goal yet. Try this prompt again.'
+      : decision.kind === 'question' ? 'Try what you remember, or tell me if you’re unsure.'
+      : 'I didn’t catch that clearly. Try recording again.';
+    const reply = challengeCueReply(cue, lead, 'gently');
+    pushTutorMessage(session, reply);
+    const view = activeChallengeView(session, turn, reply);
+    return storeChallengeResult(challenge, id, {
+      ...view, canSkip: decision.kind === 'result' || latest.canSkip, transcript: heard,
+    });
   } catch (error) {
     if (!stillOpen()) return turnConflict();
     if (error instanceof InworldRealtimeError) console.warn('[Verba] Challenge turn failed. ' + error.message);

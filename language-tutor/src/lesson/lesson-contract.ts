@@ -42,6 +42,6 @@ export type ChallengeTaskResult = {
 
 type ChallengeMedia = { reply: TutorReply; audioPath: string; messages: ChatMessage[]; transcript?: string | null };
 export type ChallengeView =
-  | (ChallengeMedia & { status: 'active'; turn: ChallengeTurn })
+  | (ChallengeMedia & { status: 'active'; turn: ChallengeTurn; canSkip?: boolean })
   | (ChallengeMedia & { status: 'complete'; results: [ChallengeTaskResult, ChallengeTaskResult] })
   | { status: 'ended' };

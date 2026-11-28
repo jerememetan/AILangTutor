@@ -11,7 +11,7 @@ type LessonAction =
   | { type: 'lesson-turn'; turn: PendingTurn }
   | { type: 'challenge-start' }
   | { type: 'challenge-end' }
-  | { type: 'challenge-turn'; id: string; turn: ChallengeTurn; audio: Blob };
+  | { type: 'challenge-turn'; id: string; turn: ChallengeTurn; audio?: Blob };
 
 function actionRequest(action: LessonAction): { path: string; body?: FormData } {
   if (action.type === 'challenge-start') return { path: 'challenge/start' };
@@ -21,7 +21,8 @@ function actionRequest(action: LessonAction): { path: string; body?: FormData } 
   if (action.type === 'challenge-turn') {
     body.set('turnId', action.id);
     body.set('turn', String(action.turn));
-    body.set('audio', action.audio, 'learner-audio');
+    if (action.audio) body.set('audio', action.audio, 'learner-audio');
+    else body.set('kind', 'skip');
     return { path: 'challenge/turns', body };
   }
   const { id, goal, audio } = action.turn;
@@ -116,7 +117,7 @@ export function useLessonSession(level: LevelId) {
     setPending(true);
     setError('');
     setFailedAction(null);
-    const recording = action.type === 'challenge-turn' ||
+    const recording = action.type === 'challenge-turn' && Boolean(action.audio) ||
       (action.type === 'lesson-turn' && Boolean(action.turn.audio));
     setCanRecordAgain(recording);
     retryAction.current = null;
@@ -184,6 +185,12 @@ export function useLessonSession(level: LevelId) {
     }
   }
 
+  function skipChallengeTurn() {
+    if (challengeVisible && challenge?.status === 'active' && challenge.canSkip && !retryAction.current && !roomExpired) {
+      void send({ type: 'challenge-turn', id: crypto.randomUUID(), turn: challenge.turn });
+    }
+  }
+
   function startChallenge() {
     if (view && !view.activeGoal && !recap && !challenge && !retryAction.current && !roomExpired) {
       void send({ type: 'challenge-start' });
@@ -244,7 +251,7 @@ export function useLessonSession(level: LevelId) {
 
   return {
     view, recap, messages: history.messages, pending, error, failedAction, submit, end, challenge, challengeVisible,
-    startChallenge, endChallenge, recordAgain, canRecordAgain, roomExpired, restartLesson,
+    startChallenge, endChallenge, skipChallengeTurn, recordAgain, canRecordAgain, roomExpired, restartLesson,
     showChallengeResults: () => { if (challenge?.status === 'complete') setChallengeVisible(true); },
     backToLessonRecap: () => setChallengeVisible(false),
     retry: () => {

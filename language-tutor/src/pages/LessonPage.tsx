@@ -71,7 +71,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
     : pending || mic.status === 'finishing' ? 'Processing your turn…'
     : loadingAudio ? 'Preparing Jiwon’s audio…'
     : activeChallenge ? 'Your turn'
-    : challenge?.status === 'complete' ? 'Challenge complete'
+    : challenge?.status === 'complete' ? 'Challenge results'
     : finished ? 'Lesson complete'
     : view ? 'Your turn' : session.error ? 'Lesson unavailable' : 'Planning your lesson…';
 
@@ -193,7 +193,8 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
         </section>
 
         <aside className="lesson-sidebar" aria-label="Lesson goals and chat history">
-          {challenge ? <ChallengePanel challenge={challenge} textFallback={textFallback} tutorId={tutor.id} onBack={() => {
+          {challenge ? <ChallengePanel challenge={challenge} textFallback={textFallback} tutorId={tutor.id}
+            canSkip={ready && !capturing} onSkip={session.skipChallengeTurn} onBack={() => {
             tutorAudio.stop();
             session.backToLessonRecap();
           }} /> : <section className="lesson-agenda" aria-label={recap || finished ? 'Lesson recap' : 'Lesson goals'}>
@@ -251,10 +252,12 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
   );
 }
 
-function ChallengePanel({ challenge, textFallback, tutorId, onBack }: {
+function ChallengePanel({ challenge, textFallback, tutorId, canSkip, onSkip, onBack }: {
   challenge: Exclude<ChallengeView, { status: 'ended' }>;
   textFallback: boolean;
   tutorId: string;
+  canSkip: boolean;
+  onSkip: () => void;
   onBack: () => void;
 }) {
   const complete = challenge.status === 'complete';
@@ -267,15 +270,24 @@ function ChallengePanel({ challenge, textFallback, tutorId, onBack }: {
           <TutorCaption reply={challenge.reply} />
         </div>
       )}
+      {!complete && challenge.canSkip && (
+        <div className="lesson-next">
+          <p>Try this prompt again, or move on and review it afterwards.</p>
+          <button type="button" className="lesson-secondary" disabled={!canSkip} onClick={onSkip}>
+            {challenge.turn === 1 ? 'Skip to next prompt' : 'See results'}
+          </button>
+        </div>
+      )}
       {complete && (
         <>
+          <p className="lesson-count">{challenge.results.filter(({ outcome }) => outcome === 'independent').length} of {challenge.results.length} skills demonstrated</p>
           <ol className="lesson-goals lesson-challenge-results">
             {challenge.results.map(({ title, outcome, quote, example }, index) => (
               <li key={title}>
                 <span className="lesson-goal-marker" aria-hidden="true">{index + 1}</span>
                 <div>
                   <strong>{title}</strong>
-                  <small>{outcome === 'independent' ? 'Did it independently' : 'Can practise this again'}</small>
+                  <small>{outcome === 'independent' ? 'Did it independently' : 'Still to practise'}</small>
                   {quote && <p>You said <span lang="ko">{quote}</span></p>}
                   <p>Example <span lang="ko">{example}</span></p>
                 </div>
