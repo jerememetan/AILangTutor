@@ -11,7 +11,17 @@ npm ci
 if (-not (Test-Path .env.lesson.local)) { Copy-Item .env.example .env.lesson.local }
 ```
 
-Add your Inworld Base64 API key to `.env.lesson.local` and start both processes in separate terminals.
+Fill in the three values in `.env.lesson.local`.
+
+| Setting | Value |
+| --- | --- |
+| `INWORLD_API_KEY` | Your Inworld Base64 API key with Realtime access |
+| `ELEVENLABS_API_KEY` | Your ElevenLabs API key with Text to Speech access |
+| `ELEVENLABS_VOICE_ID` | The ID for **Anna Kim · Tender, Calm and Clear** |
+
+Find Anna Kim in [ElevenLabs Voice Library](https://elevenlabs.io/app/voice-library) and add her to **My Voices**. Open the three-dot menu beside her and choose **Copy voice ID**.
+
+Start both processes in separate terminals from `language-tutor/`.
 
 ```powershell
 npm run dev:lesson
@@ -26,9 +36,9 @@ For a local production build, run `npm run build` and open [http://127.0.0.1:878
 
 ## Voice lessons
 
-Verba runs every voice lesson through Inworld Realtime. The only required setting is `INWORLD_API_KEY` with Realtime access. The default model is `openai/gpt-6-luna`, routed through Inworld, and Jiwon’s default voice is Olivia. The server keeps the key out of the browser and Git.
+Verba uses Inworld Realtime for speech transcription, lesson planning, and assessment. The default lesson model is `openai/gpt-6-luna`, routed through Inworld. ElevenLabs uses Eleven v4 to stream Jiwon’s speech. The server keeps both API keys out of the browser and Git.
 
-Verba asks the model to generate and validate a speaking agenda at the start of the call. When you release the button, Verba uploads one clip. The lesson’s server-side WebSocket sends it to Inworld for transcription and asks the model to assess the active goal. Verba checks that evidence used for progress appears in the learner’s transcript. Inworld speaks the verified reply, and Jiwon’s mouth follows the audio as the browser plays it.
+Verba asks the model to generate and validate a speaking agenda at the start of the call. When you release the button, Verba uploads one clip. The lesson’s server-side WebSocket sends it to Inworld for transcription and asks the model to assess the active goal. Verba checks that evidence used for progress appears in the learner’s transcript. The server adds cues such as `[warmly]`, `[gently]`, and `[encouraging]` to the text it sends to ElevenLabs. Captions show the plain reply. Jiwon’s mouth follows the streamed audio as the browser plays it.
 
 The server caches accepted turns so a retry leaves progress consistent. The in-memory session lasts for one run and refresh starts a new lesson.
 
@@ -40,4 +50,4 @@ The server caches accepted turns so a retry leaves progress consistent. The in-m
 4. Follow the generated introduction prompt. For example, say 제 이름은 제레미예요 if she asks for your name.
 5. Show the **2 of 2** recap and the goal where you asked for help.
 
-`npm run test:lesson` exercises the lesson flow with simulated Inworld responses. `npm run build` checks TypeScript and the bundle. Before presenting, try the walkthrough in a browser with the real microphone and a configured Inworld key.
+`npm run test:lesson` exercises the lesson flow with simulated Inworld and ElevenLabs responses. `npm run build` checks TypeScript and the bundle. Before presenting, try the walkthrough in a browser with the real microphone and both providers configured.

@@ -17,9 +17,6 @@ type RealtimeEvent = {
   item_id?: string;
   transcript?: string;
   response_id?: string;
-  request_event_id?: string;
-  accepted?: boolean;
-  delta?: string;
   response?: { id: string; status: string; metadata?: Record<string, string> };
   name?: string;
   arguments?: string;
@@ -51,7 +48,6 @@ const audioChunkBytes = pcmSampleRate * 2 / 10;
 export type RealtimeRoom = {
   plan(level: LevelId): Promise<LessonPlan>;
   evaluate(audio: Uint8Array, context: TurnContext): Promise<{ transcript: string; result: Assessment | null }>;
-  speak(reply: TutorReply, emit: (audio: Uint8Array) => void): Promise<void>;
 };
 
 export type RealtimeProvider = {
@@ -160,31 +156,6 @@ async function requestTool<T>(
   return call.result;
 }
 
-function speak(socket: WebSocket, signal: AbortSignal, reply: TutorReply, emit: (audio: Uint8Array) => void) {
-  const requestId = randomUUID();
-  let responseId: string | undefined;
-  let spoke = false;
-  return exchange(socket, signal, (event) => {
-    if (event.type === 'response.speak.acknowledged' && event.request_event_id === requestId) {
-      if (!event.accepted || !event.response_id) throw new Error('Inworld could not start tutor audio.');
-      responseId = event.response_id;
-    }
-    if (!responseId) return;
-    if (event.type === 'response.output_audio.delta' && event.response_id === responseId && event.delta) {
-      emit(Buffer.from(event.delta, 'base64'));
-      spoke = true;
-    }
-    if (event.type === 'response.done' && event.response?.id === responseId) {
-      if (event.response.status !== 'completed' || !spoke) throw new Error('Inworld did not finish tutor audio.');
-      return true;
-    }
-  }, () => send(socket, {
-    type: 'response.speak',
-    event_id: requestId,
-    text: [reply.english, reply.korean, reply.prompt].filter(Boolean).join(' '),
-  }));
-}
-
 export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connectSocket): RealtimeProvider | null {
   const apiKey = env.INWORLD_API_KEY;
   if (!apiKey) return null;
@@ -193,11 +164,10 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
     type: 'realtime',
     model,
     ...(model === 'openai/gpt-6-luna' && { text_generation_config: { reasoning: { effort: 'NONE' } } }),
-    output_modalities: ['audio'],
+    output_modalities: ['text'],
     max_output_tokens: 350,
     audio: {
       input: { format: pcm, transcription: { model: 'inworld/inworld-stt-1' }, turn_detection: null },
-      output: { format: pcm, model: 'inworld-tts-2', voice: env.INWORLD_VOICE_ID || 'Olivia' },
     },
     providerData: { auto_tool_response: false, stt: { language_hints: ['ko-KR', 'en-US'] } },
   };
@@ -254,7 +224,6 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
           ].join('\n'), 350, readAssessment) : null;
           return { transcript, result };
         }),
-        speak: async (reply, emit) => { await run((connected) => speak(connected, signal, reply, emit)); },
       };
     },
   };

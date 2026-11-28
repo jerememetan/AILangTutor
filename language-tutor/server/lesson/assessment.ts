@@ -25,7 +25,7 @@ For demonstrated answers put an exact Hangul-containing substring of the learner
 A transcript with only an English answer, an unrelated quote, a guessed interpretation, or no clear speech cannot demonstrate the goal.
 Do not infer pronunciation quality from text or invent words the learner said.
 If supplying target Korean wording to model, set gaveExample to true.
-Reply with up to two short English sentences and at most one short Korean phrase, with no markup or romanization.
+Reply with up to two short English sentences and at most one short Korean phrase. Use plain text without audio tags or romanization.
 The application supplies the next prompt and determines progress. Do not announce that a goal was completed.`;
 
 export function readAssessment(output: string): Assessment {

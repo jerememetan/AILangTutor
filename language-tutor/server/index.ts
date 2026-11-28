@@ -4,13 +4,15 @@ import { extname, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { createElevenLabsVoice } from './lesson/elevenLabsVoice.ts';
 import { createLessonHandler, maxRequestBytes } from './lesson/handler.ts';
 import { createRealtimeProvider } from './lesson/inworldRealtime.ts';
 
 const port = 8787;
 const clientRoot = fileURLToPath(new URL('../dist', import.meta.url));
 const provider = createRealtimeProvider(process.env);
-const lesson = createLessonHandler(provider);
+const voice = createElevenLabsVoice(process.env);
+const lesson = createLessonHandler(provider, voice);
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.webp': 'image/webp',
@@ -81,4 +83,5 @@ const server = createServer(async (request, response) => {
 server.listen(port, '127.0.0.1', () => {
   console.log(`Verba lesson API and built app at http://127.0.0.1:${port}`);
   if (!provider) console.log('Set INWORLD_API_KEY in .env.lesson.local to start live lessons.');
+  if (!voice) console.log('Set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env.lesson.local for Jiwon’s voice.');
 });

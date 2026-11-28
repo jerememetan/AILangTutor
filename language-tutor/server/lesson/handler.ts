@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { koreanTutorId, levelIds, maxPcmBytes, minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
-import type { LevelId, Recap, SessionView, TutorReply } from '../../src/lesson/lesson-contract.ts';
+import type { LevelId, Recap, SessionView } from '../../src/lesson/lesson-contract.ts';
+import type { SpokenReply, TutorVoice } from './elevenLabsVoice.ts';
 import { applyTurn, currentGoal, newProgress } from './session.ts';
 import type { LessonTurn, Progress } from './session.ts';
 import type { LessonPlan } from './lessonPlan.ts';
@@ -19,7 +20,7 @@ type PcmReply = {
   readers: Set<ReadableStreamDefaultController<Uint8Array>>;
   done: boolean;
 };
-type ReplyAudio = { reply: TutorReply; pcm?: PcmReply };
+type ReplyAudio = { reply: SpokenReply; pcm?: PcmReply };
 type Session = {
   id: string;
   owner: string;
@@ -46,7 +47,7 @@ const problem = (status: number, error: string) => json({ error }, status);
 const browserId = (request: Request) => request.headers.get('cookie')?.match(/(?:^|; )verba_lesson=([a-f0-9-]{36})(?:;|$)/i)?.[1];
 const recap = ({ completed, helpByGoal }: Progress): Recap => ({ completed, helpByGoal });
 
-function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>, reply: TutorReply): SessionView {
+function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>, reply: SpokenReply): SessionView {
   const id = randomUUID();
   session.audio.set(id, { reply });
   // Keep the current reply and a few recent replies for replay and network retries.
@@ -58,22 +59,22 @@ function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>,
     ...recap(session.progress),
     agenda: { title: session.plan.title, goals: session.plan.goals.map(({ id, title, practice }) => ({ id, title, practice })) },
     activeGoal: currentGoal(session.plan, session.progress)?.id ?? null,
-    reply,
+    reply: { english: reply.english, korean: reply.korean, prompt: reply.prompt },
     audioPath: `${prefix}/${session.id}/audio/${id}`,
   };
 }
 
-function streamReply(audio: ReplyAudio, room: RealtimeRoom) {
+function streamReply(audio: ReplyAudio, voice: TutorVoice, signal: AbortSignal) {
   if (!audio.pcm) {
     const pcm: PcmReply = { chunks: [], readers: new Set(), done: false };
     audio.pcm = pcm;
     let bytes = 0;
-    void room.speak(audio.reply, (chunk) => {
+    void voice(audio.reply, (chunk) => {
       bytes += chunk.byteLength;
       if (bytes > maxPcmBytes) throw new Error('Tutor audio is too long.');
       pcm.chunks.push(chunk);
       for (const reader of pcm.readers) reader.enqueue(chunk);
-    }).then(() => {
+    }, signal).then(() => {
       pcm.done = true;
       for (const reader of pcm.readers) reader.close();
       pcm.readers.clear();
@@ -98,7 +99,7 @@ function streamReply(audio: ReplyAudio, room: RealtimeRoom) {
   return new Response(body, { headers: { 'Content-Type': pcmAudioType, 'Cache-Control': 'no-store' } });
 }
 
-export function createLessonHandler(provider: RealtimeProvider | null) {
+export function createLessonHandler(provider: RealtimeProvider | null, voice: TutorVoice | null) {
   const sessions = new Map<string, Session>();
   const planning = new Map<string, Promise<Session>>();
 
@@ -109,6 +110,7 @@ export function createLessonHandler(provider: RealtimeProvider | null) {
       return problem(403, 'Open the lesson from Verba.');
     }
     if (!provider) return problem(503, 'Live voice requires an Inworld API key on the lesson server.');
+    if (!voice) return problem(503, 'Configure an ElevenLabs API key and Jiwon’s voice ID on the lesson server.');
     const now = Date.now();
     for (const [id, session] of sessions) {
       if (now - session.lastActivity <= (session.ended ? 60_000 : idleMs)) continue;
@@ -142,7 +144,12 @@ export function createLessonHandler(provider: RealtimeProvider | null) {
             };
             const session: Session = {
               ...start, owner: owner ?? randomUUID(), entryId, level,
-              latest: writeView(start, { english: plan.opening, korean: null, prompt: plan.goals[0].practice }),
+              latest: writeView(start, {
+                delivery: 'warmly',
+                english: plan.opening,
+                korean: null,
+                prompt: plan.goals[0].practice,
+              }),
               turnResults: new Map(), pendingTurn: false, ended: false, lastActivity: Date.now(), controller,
             };
             sessions.set(session.id, session);
@@ -182,7 +189,7 @@ export function createLessonHandler(provider: RealtimeProvider | null) {
     if (match[3] && request.method === 'GET') {
       const audio = session.audio.get(match[3]);
       if (!audio) return problem(404, 'This reply is unavailable.');
-      return streamReply(audio, session.room);
+      return streamReply(audio, voice, session.controller.signal);
     }
 
     if (match[2] !== 'turns' || request.method !== 'POST') return problem(405, 'Use a supported lesson action.');

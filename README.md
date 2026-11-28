@@ -24,14 +24,14 @@ npm ci
 if (-not (Test-Path .env.lesson.local)) { Copy-Item .env.example .env.lesson.local }
 ```
 
-Set `INWORLD_API_KEY` in `language-tutor/.env.lesson.local` to your Inworld Base64 API key with Realtime access. From `language-tutor/`, run `npm run dev:lesson` and `npm run dev` in separate terminals.
+Fill in `INWORLD_API_KEY`, `ELEVENLABS_API_KEY`, and `ELEVENLABS_VOICE_ID` in `language-tutor/.env.lesson.local`. Use the voice ID for **Anna Kim · Tender, Calm and Clear**. The [app README](language-tutor/README.md#run-the-lesson-locally) shows where to find it. From `language-tutor/`, run `npm run dev:lesson` and `npm run dev` in separate terminals.
 
 Open the URL printed by Vite and choose **Han Jiwon → New to it → Start lesson**. Turn on the mic and allow browser access. If playback is blocked, select **Play tutor audio**.
 
 ## How it works
 
-React, TypeScript, and Vite run the app. Three.js renders the VRM tutor and animates her mouth from the audio the browser plays. A Node.js server uses Inworld Realtime for transcription, model-powered lesson planning and assessment, and streamed tutor speech.
+React, TypeScript, and Vite run the app. Three.js renders the VRM tutor and animates her mouth from the audio the browser plays. A Node.js server uses Inworld Realtime for transcription, lesson planning, and assessment. ElevenLabs streams Jiwon’s replies with delivery cues for greetings, hints, and encouragement.
 
-From `language-tutor/`, run `npm run test:lesson` for the lesson tests with simulated Inworld responses and `npm run build` for the TypeScript check and production bundle.
+From `language-tutor/`, run `npm run test:lesson` for the lesson tests with simulated provider responses and `npm run build` for the TypeScript check and production bundle.
 
 See the [app README](language-tutor/README.md) for the demo walkthrough and the [avatar notes](language-tutor/public/avatars/README.md) for model setup.

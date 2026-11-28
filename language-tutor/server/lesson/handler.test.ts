@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
 import type { GoalId, LevelId, OpenLesson, Recap, SessionView } from '../../src/lesson/lesson-contract.ts';
+import { createElevenLabsVoice } from './elevenLabsVoice.ts';
+import type { TutorVoice } from './elevenLabsVoice.ts';
 import { createLessonHandler } from './handler.ts';
 import { createRealtimeProvider } from './inworldRealtime.ts';
 import type { RealtimeProvider, RealtimeRoom } from './inworldRealtime.ts';
@@ -57,8 +59,9 @@ const lessonRoom: RealtimeRoom = {
     }
     return { transcript, result: demonstrated(transcript === clips.badQuote ? clips.greeting : transcript) };
   },
-  async speak(_reply, emit) { emit(new Uint8Array([1, 2, 3, 4])); },
 };
+
+const fixtureVoice: TutorVoice = async (_reply, emit) => { emit(new Uint8Array([1, 2, 3, 4])); };
 
 function fixtureProvider(overrides: (signal: AbortSignal) => Partial<RealtimeRoom> = () => ({})): RealtimeProvider {
   return { room: (signal) => ({ ...lessonRoom, ...overrides(signal) }) };
@@ -95,11 +98,11 @@ type ClientEvent = {
   type: string;
   session?: {
     model: string;
+    output_modalities: string[];
     text_generation_config?: { reasoning: { effort: string } };
-    audio: { input: { turn_detection: unknown } };
+    audio: { input: { turn_detection: unknown }; output?: unknown };
     providerData: { auto_tool_response: boolean };
   };
-  event_id?: string;
   response?: { metadata: Record<string, string>; tool_choice: string; instructions: string; tools: { name: string }[] };
   item?: { call_id: string };
   audio?: string;
@@ -146,7 +149,7 @@ function sendToolResult(socket: FakeInworldSocket, request: ClientEvent, result:
 
 const pcmClip = new Blob([new Uint8Array(minPcmBytes)], { type: pcmAudioType });
 
-test('Realtime streams tutor audio early and advances only on evidence from the matching learner turn', async () => {
+test('Inworld checks spoken evidence while ElevenLabs streams the welcome early and caches it for replay', async () => {
   let connections = 0;
   let synthesizedReplies = 0;
   let plans = 0;
@@ -154,6 +157,27 @@ test('Realtime streams tutor audio early and advances only on evidence from the 
   let closed: FakeInworldSocket | undefined;
   let finishAudio: () => void = () => assert.fail('Tutor audio has not started.');
   const assessments = [clips.badQuote, clips.greeting];
+  const voice = createElevenLabsVoice({
+    ELEVENLABS_API_KEY: 'test-elevenlabs',
+    ELEVENLABS_VOICE_ID: 'test-anna',
+  }, async (url, init) => {
+    synthesizedReplies++;
+    assert.equal(url, 'https://api.elevenlabs.io/v1/text-to-speech/test-anna/stream?output_format=pcm_24000');
+    assert.equal(new Headers(init?.headers).get('xi-api-key'), 'test-elevenlabs');
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      text: `[warmly] ${modelAgenda('beginner').opening} [encouraging] ${modelGoals[0].practice}`,
+      model_id: 'eleven_v4',
+    });
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        finishAudio = () => {
+          controller.enqueue(new Uint8Array([3, 4]));
+          controller.close();
+        };
+      },
+    }));
+  });
   const provider = createRealtimeProvider({ INWORLD_API_KEY: 'fake' }, (url, headers) => {
     assert.match(url, /^wss:\/\/api\.inworld\.ai\/api\/v1\/realtime\/session\?key=/);
     assert.equal(headers.Authorization, 'Basic fake');
@@ -165,16 +189,9 @@ test('Realtime streams tutor audio early and advances only on evidence from the 
           assert.equal(event.session?.text_generation_config?.reasoning.effort, 'NONE');
           assert.equal(event.session?.audio.input.turn_detection, null);
           assert.equal(event.session?.providerData.auto_tool_response, false);
+          assert.deepEqual(event.session?.output_modalities, ['text']);
+          assert.equal(event.session?.audio.output, undefined);
           socket.emit({ type: 'session.updated' });
-          break;
-        case 'response.speak':
-          synthesizedReplies++;
-          socket.emit({ type: 'response.speak.acknowledged', accepted: true, request_event_id: event.event_id, response_id: 'voice' });
-          socket.emit({ type: 'response.output_audio.delta', response_id: 'voice', delta: 'AQI=' });
-          finishAudio = () => {
-            socket.emit({ type: 'response.output_audio.delta', response_id: 'voice', delta: 'AwQ=' });
-            socket.emit({ type: 'response.done', response: { id: 'voice', status: 'completed' } });
-          };
           break;
         case 'input_audio_buffer.append':
           assert.equal(Buffer.from(event.audio ?? '', 'base64').length, minPcmBytes);
@@ -204,7 +221,7 @@ test('Realtime streams tutor audio early and advances only on evidence from the 
     closed = fixture;
     return fixture as unknown as WebSocket;
   });
-  const handler = createLessonHandler(provider);
+  const handler = createLessonHandler(provider, voice);
   const session = await enter(handler);
   const audioRequest = () => new Request(new URL(session.view.audioPath, base), { headers: { Cookie: session.cookie } });
   const opening = await handler(audioRequest());
@@ -247,7 +264,7 @@ test('Realtime reconnects on a retry after the socket drops during transcription
       }
     }) as unknown as WebSocket;
   });
-  const handler = createLessonHandler(provider);
+  const handler = createLessonHandler(provider, fixtureVoice);
   const session = await enter(handler);
   const id = randomUUID();
   assert.equal((await handler(turn(session, 'goal-1', 'pcm', id, pcmClip))).status, 502);
@@ -257,7 +274,7 @@ test('Realtime reconnects on a retry after the socket drops during transcription
 });
 
 test('runs the basic demo, English question, fresh Korean recall, three goals and recap', async () => {
-  const handler = createLessonHandler(fixtureProvider());
+  const handler = createLessonHandler(fixtureProvider(), fixtureVoice);
   const session = await enter(handler, 'basic');
   assert.equal(session.view.completed.length, 0);
   const accepted = new Set<string>();
@@ -283,7 +300,7 @@ test('runs the basic demo, English question, fresh Korean recall, three goals an
 });
 
 test('progress requires grounded Korean speech and remains zero on silence, invalid evidence, or hint', async () => {
-  const handler = createLessonHandler(fixtureProvider());
+  const handler = createLessonHandler(fixtureProvider(), fixtureVoice);
   const session = await enter(handler);
   for (const answer of [undefined, ' ', clips.badQuote]) {
     const response = await handler(turn(session, 'goal-1', answer));
@@ -296,7 +313,7 @@ test('progress requires grounded Korean speech and remains zero on silence, inva
 });
 
 test('deduplicates retries, isolates browser sessions, and starts a clean room on re-entry', async () => {
-  const handler = createLessonHandler(fixtureProvider());
+  const handler = createLessonHandler(fixtureProvider(), fixtureVoice);
   const entryId = randomUUID();
   const session = await enter(handler, 'comfortable', entryId);
   assert.equal(session.view.agenda.goals.length, 4);
@@ -320,7 +337,7 @@ test('switching levels gets a new agenda, while retries preserve the original ag
       planRequests.push(level);
       return lessonRoom.plan(level);
     },
-  })));
+  })), fixtureVoice);
   const entryId = randomUUID();
   const [comfortable, duplicate] = await Promise.all([
     enter(handler, 'comfortable', entryId),
@@ -348,7 +365,7 @@ test('rejects invalid generated agendas and lets the learner retry lesson setup'
       if (++attempts === 1) return readLessonPlan(JSON.stringify(modelAgenda('comfortable')), level);
       return lessonRoom.plan(level);
     },
-  })));
+  })), fixtureVoice);
   const entryId = randomUUID();
   const invalid = await handler(entryRequest('beginner', entryId));
   assert.equal(invalid.status, 502);
@@ -363,7 +380,7 @@ test('closing an active room aborts assessment and does not allow a late result 
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
       return { transcript: clips.greeting, result: demonstrated(clips.greeting) };
     },
-  })));
+  })), fixtureVoice);
   let markStarted: () => void = () => {};
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const session = await enter(handler);
@@ -380,12 +397,10 @@ test('closing an active room aborts assessment and does not allow a late result 
 
 test('voice retry uses the accepted reply and leaves assessment unchanged', async () => {
   let audioCalls = 0;
-  const handler = createLessonHandler(fixtureProvider(() => ({
-    async speak(_reply, emit) {
-      if (++audioCalls === 1) throw new Error('Temporary voice failure');
-      emit(new Uint8Array([4, 5, 6, 7]));
-    },
-  })));
+  const handler = createLessonHandler(fixtureProvider(), async (_reply, emit) => {
+    if (++audioCalls === 1) throw new Error('Temporary voice failure');
+    emit(new Uint8Array([4, 5, 6, 7]));
+  });
   const session = await enter(handler);
   const view = await handler(turn(session, 'goal-1', clips.greeting)).then((r) => r.json()) as SessionView;
   assert.equal(view.completed.length, 1);
@@ -401,8 +416,39 @@ test('voice retry uses the accepted reply and leaves assessment unchanged', asyn
 });
 
 test('opening a lesson requires an Inworld key', async () => {
-  const handler = createLessonHandler(createRealtimeProvider({}));
+  const handler = createLessonHandler(createRealtimeProvider({}), fixtureVoice);
   const response = await handler(entryRequest('beginner'));
   assert.equal(response.status, 503);
   assert.match(await response.text(), /Inworld API key/);
+});
+
+test('opening a lesson requires an ElevenLabs key and voice ID', async () => {
+  for (const env of [{ ELEVENLABS_API_KEY: 'test' }, { ELEVENLABS_VOICE_ID: 'test' }]) {
+    const handler = createLessonHandler(fixtureProvider(), createElevenLabsVoice(env));
+    const response = await handler(entryRequest('beginner'));
+    assert.equal(response.status, 503);
+    assert.match(await response.text(), /ElevenLabs API key.*voice ID/);
+  }
+});
+
+test('coaching adds gentle and encouraging delivery only to the synthesized speech', async () => {
+  const delivered: string[] = [];
+  const voice = createElevenLabsVoice({ ELEVENLABS_API_KEY: 'test', ELEVENLABS_VOICE_ID: 'test' }, async (_url, init) => {
+    delivered.push(JSON.parse(String(init?.body)).text);
+    return new Response(new Uint8Array([1, 2]));
+  });
+  const handler = createLessonHandler(fixtureProvider(), voice);
+  const session = await enter(handler);
+  for (const answer of [clips.help, clips.greeting]) {
+    const view = await handler(turn(session, 'goal-1', answer)).then((response) => response.json()) as SessionView;
+    assert.equal(view.completed.length, 0);
+    assert.deepEqual(Object.keys(view.reply), ['english', 'korean', 'prompt']);
+    assert.doesNotMatch(JSON.stringify(view.reply), /\[(?:gently|encouraging)\]/);
+    const audio = await handler(new Request(new URL(view.audioPath, base), { headers: { Cookie: session.cookie } }));
+    assert.deepEqual(await audio.bytes(), new Uint8Array([1, 2]));
+  }
+  assert.deepEqual(delivered, [
+    `[gently] Here’s a polite greeting. 안녕하세요. [encouraging] ${modelGoals[0].practice}`,
+    `[encouraging] Good practice. Now try it once more from memory. ${modelGoals[0].practice}`,
+  ]);
 });

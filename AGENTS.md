@@ -30,7 +30,7 @@ Use Jereme's `teach` skill as the reference for turn-taking, feedback, retries, 
 
 The React application and its package lock live in `language-tutor/`. Run npm commands there. Use `npm ci` for a fresh checkout, `npm run dev` for the local app, and `npm run build` to check TypeScript and the production bundle. The frontend uses React, TypeScript, Vite, plain CSS, Lucide React, Three.js, and `@pixiv/three-vrm`.
 
-Run `npm run dev:lesson` from `language-tutor/` to start the lesson API. Verba uses Inworld Realtime for transcription, lesson planning, assessment and coaching with an OpenAI model, and streamed tutor audio. Verba validates the assessment against the learner’s transcript and owns lesson progress. Set `INWORLD_API_KEY` in the server environment or `language-tutor/.env.lesson.local`. Use `npm run test:lesson` to run the lesson tests.
+Run `npm run dev:lesson` from `language-tutor/` to start the lesson API. Inworld Realtime handles transcription, lesson planning, assessment, and coaching with an OpenAI model. Verba validates the assessment and owns lesson progress. ElevenLabs streams Jiwon’s voice using Eleven v4 and delivery tags added server-side. Set `INWORLD_API_KEY`, `ELEVENLABS_API_KEY`, and Anna Kim’s `ELEVENLABS_VOICE_ID` in the server environment or `language-tutor/.env.lesson.local`. Use `npm run test:lesson` to run the lesson tests.
 
 ## Prototype baseline
 

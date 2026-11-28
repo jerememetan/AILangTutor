@@ -1,4 +1,5 @@
-import type { GoalId, Recap, TutorReply } from '../../src/lesson/lesson-contract.ts';
+import type { GoalId, Recap } from '../../src/lesson/lesson-contract.ts';
+import type { SpokenReply } from './elevenLabsVoice.ts';
 import type { LessonPlan } from './lessonPlan.ts';
 
 export type Assessment = {
@@ -25,7 +26,7 @@ export function newProgress(): Progress {
 
 const normalize = (line: string) => line.normalize('NFC').trim().replace(/\s+/gu, ' ');
 
-export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn): { progress: Progress; reply: TutorReply } {
+export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn): { progress: Progress; reply: SpokenReply } {
   const goal = currentGoal(plan, progress);
   if (!goal || goal.id !== turn.goal || progress.completed.some((item) => item.turnId === turn.id)) {
     throw new Error('Turn does not belong to the active goal.');
@@ -35,6 +36,7 @@ export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn
     return {
       progress: { ...progress, helpByGoal: { ...progress.helpByGoal, [goal.id]: 'Practised with a hint.' }, recallRequired: progress.recallRequired || previouslyHelped },
       reply: {
+        delivery: 'gently',
         english: previouslyHelped ? 'Here’s a Korean example you can practise.' : goal.hint,
         korean: previouslyHelped ? goal.example : null,
         prompt: goal.practice,
@@ -51,7 +53,7 @@ export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn
     if (progress.recallRequired) {
       return {
         progress: { ...progress, recallRequired: false },
-        reply: { english: 'Good practice. Now try it once more from memory.', korean: null, prompt: goal.practice },
+        reply: { delivery: 'encouraging', english: 'Good practice. Now try it once more from memory.', korean: null, prompt: goal.practice },
       };
     }
     const next = {
@@ -63,6 +65,7 @@ export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn
     return {
       progress: next,
       reply: {
+        delivery: 'encouraging',
         english: nextGoal ? result.english : `${result.english} You finished all your speaking goals for this lesson.`,
         korean: result.korean,
         prompt: nextGoal?.practice ?? (hadHelp
@@ -74,7 +77,7 @@ export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn
   if (!result || result.verdict === 'unclear' || result.verdict === 'demonstrated') {
     return {
       progress,
-      reply: { english: 'I didn’t catch that clearly. Could you try again?', korean: null, prompt: goal.practice },
+      reply: { delivery: 'gently', english: 'I didn’t catch that clearly. Could you try again?', korean: null, prompt: goal.practice },
     };
   }
   return {
@@ -83,6 +86,6 @@ export function applyTurn(plan: LessonPlan, progress: Progress, turn: LessonTurn
       helpByGoal: { ...progress.helpByGoal, [goal.id]: result.verdict === 'side-question' ? 'Asked for an explanation.' : 'Practised again after feedback.' },
       recallRequired: progress.recallRequired || result.gaveExample,
     },
-    reply: { english: result.english, korean: result.korean, prompt: goal.practice },
+    reply: { delivery: 'gently', english: result.english, korean: result.korean, prompt: goal.practice },
   };
 }
