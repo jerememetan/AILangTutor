@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import type { GoalId, OpenLesson, Recap, SessionView } from '../../src/lesson/lesson-contract.ts';
+import { minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
+import type { GoalId, LevelId, OpenLesson, Recap, SessionView } from '../../src/lesson/lesson-contract.ts';
 import { createLessonHandler } from './handler.ts';
-import { createProviders } from './providers.ts';
-import type { LessonProviders } from './providers.ts';
+import { createRealtimeProvider } from './inworldRealtime.ts';
+import type { RealtimeProvider, RealtimeRoom } from './inworldRealtime.ts';
+import { readLessonPlan } from './lessonPlan.ts';
 import type { Assessment } from './session.ts';
 
 const base = 'http://localhost/api/lesson/sessions';
@@ -16,26 +18,61 @@ const clips = {
   badQuote: 'Hello',
 };
 
-const transcriptAudio = (text: string) => new Blob([text], { type: 'audio/webm' });
+const modelGoals = [
+  { title: 'Open with a Korean greeting', practice: 'Greet Jiwon as you would on the first day of class.', criterion: 'Use a polite Korean greeting.', hint: 'Think of a phrase for saying hello.', example: clips.greeting },
+  { title: 'Introduce yourself by name', practice: 'Say your name in Korean to a classmate you just met.', criterion: 'Give your name in a Korean sentence.', hint: 'Use the pattern for introducing yourself.', example: clips.name },
+  { title: 'Ask a new classmate their name', practice: 'Ask Jiwon what her name is.', criterion: 'Ask your conversation partner for their name in Korean.', hint: 'Turn the Korean word for name into a polite question.', example: clips.question },
+  { title: 'Add a personal detail', practice: 'Tell Jiwon where you are from as part of your introduction.', criterion: 'State where you are from in Korean.', hint: 'Use a place name with the expression for coming from somewhere.', example: '저는 싱가포르에서 왔어요.' },
+  { title: 'React to a shared interest', practice: 'Jiwon likes music. Ask her a follow-up about it.', criterion: 'Ask a relevant follow-up question in Korean.', hint: 'Ask what kind of music she likes.', example: '어떤 음악을 좋아하세요?' },
+  { title: 'Change register for a professor', practice: 'Introduce yourself to a professor you are meeting for the first time.', criterion: 'Introduce yourself using formal Korean endings.', hint: 'Think of the more formal sentence ending.', example: '저는 제레미입니다.' },
+];
+
+function modelAgenda(level: LevelId) {
+  const order = level === 'comfortable' ? [3, 2, 4, 5] : level === 'basic' ? [0, 1, 2] : [0, 1];
+  return {
+    title: level === 'comfortable' ? 'Making a first impression' : 'Meeting a classmate',
+    opening: level === 'beginner' ? 'Hi! If you’re new to Korean, you can ask me in English.' : 'Hi! Imagine it’s your first day of class.',
+    goals: order.map((index) => modelGoals[index]),
+  };
+}
+
+function transcriptAudio(text: string) {
+  const bytes = new Uint8Array(minPcmBytes);
+  bytes.set(new TextEncoder().encode(text));
+  return new Blob([bytes], { type: pcmAudioType });
+}
 const demonstrated = (evidence: string): Assessment => ({
   verdict: 'demonstrated', evidence, english: 'Good practice.', korean: null, gaveExample: false,
 });
-const providers: LessonProviders = {
-  async transcribe(clip) { return new TextDecoder().decode(clip.bytes); },
-  async assess({ transcript }) {
+const lessonRoom: RealtimeRoom = {
+  async plan(level) { return readLessonPlan(JSON.stringify(modelAgenda(level)), level); },
+  async evaluate(audio) {
+    const transcript = new TextDecoder().decode(audio).replace(/\0+$/, '').trim();
+    if (!transcript) return { transcript, result: null };
     if (transcript === clips.help) {
-      return { verdict: 'side-question', evidence: null, english: 'Here’s a polite greeting.', korean: '안녕하세요.', gaveExample: true };
+      return {
+        transcript,
+        result: { verdict: 'side-question', evidence: null, english: 'Here’s a polite greeting.', korean: '안녕하세요.', gaveExample: true },
+      };
     }
-    return demonstrated(transcript === clips.badQuote ? clips.greeting : transcript);
+    return { transcript, result: demonstrated(transcript === clips.badQuote ? clips.greeting : transcript) };
   },
-  async speak() { return new Uint8Array([1, 2, 3]).buffer; },
+  async speak(_reply, emit) { emit(new Uint8Array([1, 2, 3, 4])); },
 };
 
-async function enter(handler: ReturnType<typeof createLessonHandler>, level = 'beginner', entryId = randomUUID(), priorCookie = '') {
-  const response = await handler(new Request(base, {
+function fixtureProvider(overrides: (signal: AbortSignal) => Partial<RealtimeRoom> = () => ({})): RealtimeProvider {
+  return { room: (signal) => ({ ...lessonRoom, ...overrides(signal) }) };
+}
+
+function entryRequest(level: LevelId, entryId = randomUUID(), priorCookie = '') {
+  return new Request(base, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: priorCookie },
     body: JSON.stringify({ tutorId: 'vita', level, entryId }),
-  }));
+  });
+}
+
+async function enter(handler: ReturnType<typeof createLessonHandler>, level: LevelId = 'beginner', entryId = randomUUID(), priorCookie = '') {
+  const response = await handler(entryRequest(level, entryId, priorCookie));
   assert.ok(response.ok);
   const cookie = response.headers.get('set-cookie')?.split(';')[0] ?? priorCookie;
   assert.ok(cookie);
@@ -54,10 +91,174 @@ function turn(session: Awaited<ReturnType<typeof enter>>, goal: GoalId, answer?:
   });
 }
 
-test('runs the beginner demo, English question, fresh Korean recall, three goals and recap', async () => {
-  const handler = createLessonHandler(providers);
+type ClientEvent = {
+  type: string;
+  session?: {
+    model: string;
+    text_generation_config?: { reasoning: { effort: string } };
+    audio: { input: { turn_detection: unknown } };
+    providerData: { auto_tool_response: boolean };
+  };
+  event_id?: string;
+  response?: { metadata: Record<string, string>; tool_choice: string; instructions: string; tools: { name: string }[] };
+  item?: { call_id: string };
+  audio?: string;
+};
+
+class FakeInworldSocket extends EventTarget {
+  readyState: number = WebSocket.OPEN;
+  onSend: (event: ClientEvent) => void;
+
+  constructor(onSend: (socket: FakeInworldSocket, event: ClientEvent) => void) {
+    super();
+    this.onSend = (event) => onSend(this, event);
+    queueMicrotask(() => this.emit({ type: 'session.created' }));
+  }
+
+  send(data: string) { queueMicrotask(() => this.onSend(JSON.parse(data))); }
+
+  emit(event: object) {
+    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
+  }
+
+  close() {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    this.dispatchEvent(new Event('close'));
+  }
+}
+
+function sendTranscript(socket: FakeInworldSocket, text: string) {
+  socket.emit({ type: 'input_audio_buffer.committed', item_id: 'current-turn' });
+  socket.emit({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'current-turn', transcript: text });
+}
+
+function sendToolResult(socket: FakeInworldSocket, request: ClientEvent, result: object) {
+  const name = request.response?.tools[0].name;
+  const response = { id: name, metadata: request.response?.metadata };
+  socket.emit({ type: 'response.created', response });
+  socket.emit({
+    type: 'response.function_call_arguments.done', response_id: response.id,
+    name, call_id: `call-${name}`, arguments: JSON.stringify(result),
+  });
+  socket.emit({ type: 'response.done', response: { ...response, status: 'completed' } });
+}
+
+const pcmClip = new Blob([new Uint8Array(minPcmBytes)], { type: pcmAudioType });
+
+test('Realtime streams tutor audio early and advances only on evidence from the matching learner turn', async () => {
+  let connections = 0;
+  let synthesizedReplies = 0;
+  let plans = 0;
+  let transcriptionCount = 0;
+  let closed: FakeInworldSocket | undefined;
+  let finishAudio: () => void = () => assert.fail('Tutor audio has not started.');
+  const assessments = [clips.badQuote, clips.greeting];
+  const provider = createRealtimeProvider({ INWORLD_API_KEY: 'fake' }, (url, headers) => {
+    assert.match(url, /^wss:\/\/api\.inworld\.ai\/api\/v1\/realtime\/session\?key=/);
+    assert.equal(headers.Authorization, 'Basic fake');
+    connections++;
+    const fixture = new FakeInworldSocket((socket, event) => {
+      switch (event.type) {
+        case 'session.update':
+          assert.equal(event.session?.model, 'openai/gpt-6-luna');
+          assert.equal(event.session?.text_generation_config?.reasoning.effort, 'NONE');
+          assert.equal(event.session?.audio.input.turn_detection, null);
+          assert.equal(event.session?.providerData.auto_tool_response, false);
+          socket.emit({ type: 'session.updated' });
+          break;
+        case 'response.speak':
+          synthesizedReplies++;
+          socket.emit({ type: 'response.speak.acknowledged', accepted: true, request_event_id: event.event_id, response_id: 'voice' });
+          socket.emit({ type: 'response.output_audio.delta', response_id: 'voice', delta: 'AQI=' });
+          finishAudio = () => {
+            socket.emit({ type: 'response.output_audio.delta', response_id: 'voice', delta: 'AwQ=' });
+            socket.emit({ type: 'response.done', response: { id: 'voice', status: 'completed' } });
+          };
+          break;
+        case 'input_audio_buffer.append':
+          assert.equal(Buffer.from(event.audio ?? '', 'base64').length, minPcmBytes);
+          break;
+        case 'input_audio_buffer.commit':
+          socket.emit({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'earlier-turn', transcript: clips.greeting });
+          sendTranscript(socket, assessments[transcriptionCount++]);
+          break;
+        case 'response.create':
+          assert.equal(event.response?.tool_choice, 'required');
+          if (event.response?.tools[0].name === 'plan_speaking_lesson') {
+            plans++;
+            assert.match(event.response.instructions, /beginner.*exactly 2/);
+            sendToolResult(socket, event, modelAgenda('beginner'));
+          } else {
+            assert.match(event.response?.instructions ?? '', /"id":"goal-1".*"criterion":"Use a polite Korean greeting."/);
+            sendToolResult(socket, event, demonstrated(clips.greeting));
+          }
+          break;
+        case 'conversation.item.create':
+          assert.match(event.item?.call_id ?? '', /^call-(assess_speaking_goal|plan_speaking_lesson)$/);
+          break;
+        default:
+          assert.fail(`Unexpected event ${event.type}`);
+      }
+    });
+    closed = fixture;
+    return fixture as unknown as WebSocket;
+  });
+  const handler = createLessonHandler(provider);
   const session = await enter(handler);
-  assert.match(session.view.reply.english, /new to Korean/);
+  const audioRequest = () => new Request(new URL(session.view.audioPath, base), { headers: { Cookie: session.cookie } });
+  const opening = await handler(audioRequest());
+  assert.equal(opening.headers.get('content-type'), pcmAudioType);
+  const reader = opening.body!.getReader();
+  assert.deepEqual(Array.from((await reader.read()).value!), [1, 2]);
+  const replay = await handler(audioRequest());
+  finishAudio();
+  assert.deepEqual(Array.from(await replay.bytes()), [1, 2, 3, 4]);
+  assert.deepEqual(Array.from((await reader.read()).value!), [3, 4]);
+  assert.equal((await reader.read()).done, true);
+  assert.equal(synthesizedReplies, 1);
+
+  const forged = await handler(turn(session, 'goal-1', 'pcm', randomUUID(), pcmClip));
+  assert.equal((await forged.json() as SessionView).completed.length, 0);
+  const valid = await handler(turn(session, 'goal-1', 'pcm', randomUUID(), pcmClip));
+  assert.equal((await valid.json() as SessionView).activeGoal, 'goal-2');
+  assert.equal(connections, 1);
+  assert.equal(plans, 1);
+
+  await handler(new Request(`${base}/${session.sessionId}/end`, {
+    method: 'POST', headers: { Cookie: session.cookie },
+  }));
+  assert.equal(closed?.readyState, WebSocket.CLOSED);
+});
+
+test('Realtime reconnects on a retry after the socket drops during transcription', async () => {
+  let connections = 0;
+  const provider = createRealtimeProvider({ INWORLD_API_KEY: 'fake' }, () => {
+    const first = ++connections === 1;
+    return new FakeInworldSocket((socket, event) => {
+      if (event.type === 'session.update') socket.emit({ type: 'session.updated' });
+      if (event.type === 'input_audio_buffer.commit') {
+        if (first) socket.close();
+        else sendTranscript(socket, clips.greeting);
+      }
+      if (event.type === 'response.create') {
+        const isPlan = event.response?.tools[0].name === 'plan_speaking_lesson';
+        sendToolResult(socket, event, isPlan ? modelAgenda('beginner') : demonstrated(clips.greeting));
+      }
+    }) as unknown as WebSocket;
+  });
+  const handler = createLessonHandler(provider);
+  const session = await enter(handler);
+  const id = randomUUID();
+  assert.equal((await handler(turn(session, 'goal-1', 'pcm', id, pcmClip))).status, 502);
+  const retry = await handler(turn(session, 'goal-1', 'pcm', id, pcmClip));
+  assert.equal((await retry.json() as SessionView).activeGoal, 'goal-2');
+  assert.equal(connections, 2);
+});
+
+test('runs the basic demo, English question, fresh Korean recall, three goals and recap', async () => {
+  const handler = createLessonHandler(fixtureProvider());
+  const session = await enter(handler, 'basic');
   assert.equal(session.view.completed.length, 0);
   const accepted = new Set<string>();
   async function say(goal: GoalId, answer: string) {
@@ -68,66 +269,107 @@ test('runs the beginner demo, English question, fresh Korean recall, three goals
     accepted.add(view.audioPath);
     return view;
   }
-  const explanation = await say('greet', clips.help);
+  const explanation = await say('goal-1', clips.help);
   assert.equal(explanation.completed.length, 0);
   assert.equal(explanation.reply.korean, '안녕하세요.');
-  assert.equal((await say('greet', clips.greeting)).completed.length, 0);
-  assert.equal((await say('greet', clips.greeting)).activeGoal, 'introduce-name');
-  assert.equal((await say('introduce-name', clips.name)).activeGoal, 'ask-name');
-  const final = await say('ask-name', clips.question);
+  assert.equal((await say('goal-1', clips.greeting)).completed.length, 0);
+  assert.equal((await say('goal-1', clips.greeting)).activeGoal, 'goal-2');
+  assert.equal((await say('goal-2', clips.name)).activeGoal, 'goal-3');
+  const final = await say('goal-3', clips.question);
   assert.equal(final.activeGoal, null);
   assert.deepEqual(final.completed.map((item) => item.quote), [clips.greeting, clips.name, clips.question]);
-  assert.equal(final.helpByGoal.greet, 'Asked for an explanation.');
-  assert.match(final.reply.english, /Han Jiwon/);
-  assert.ok(final.reply.korean);
+  assert.equal(final.helpByGoal['goal-1'], 'Asked for an explanation.');
+  assert.match(final.reply.english, /finished all your speaking goals/);
 });
 
 test('progress requires grounded Korean speech and remains zero on silence, invalid evidence, or hint', async () => {
-  const handler = createLessonHandler({ ...providers, transcribe: async (clip) => new TextDecoder().decode(clip.bytes).trim() });
+  const handler = createLessonHandler(fixtureProvider());
   const session = await enter(handler);
   for (const answer of [undefined, ' ', clips.badQuote]) {
-    const response = await handler(turn(session, 'greet', answer));
+    const response = await handler(turn(session, 'goal-1', answer));
     const view = await response.json() as SessionView;
-    assert.equal(view.activeGoal, 'greet');
+    assert.equal(view.activeGoal, 'goal-1');
     assert.equal(view.completed.length, 0);
   }
-  const wrongFormat = await handler(turn(session, 'greet', 'hello', randomUUID(), new Blob(['hi'], { type: 'text/plain' })));
+  const wrongFormat = await handler(turn(session, 'goal-1', 'hello', randomUUID(), new Blob(['hi'], { type: 'text/plain' })));
   assert.equal(wrongFormat.status, 415);
 });
 
 test('deduplicates retries, isolates browser sessions, and starts a clean room on re-entry', async () => {
-  const handler = createLessonHandler(providers);
+  const handler = createLessonHandler(fixtureProvider());
   const entryId = randomUUID();
   const session = await enter(handler, 'comfortable', entryId);
-  assert.ok(session.view.reply.korean);
+  assert.equal(session.view.agenda.goals.length, 4);
   assert.equal((await enter(handler, 'comfortable', entryId, session.cookie)).sessionId, session.sessionId);
   const turnId = randomUUID();
-  const first = await handler(turn(session, 'greet', clips.greeting, turnId)).then((r) => r.json());
-  const replay = await handler(turn(session, 'greet', clips.greeting, turnId)).then((r) => r.json());
+  const first = await handler(turn(session, 'goal-1', clips.greeting, turnId)).then((r) => r.json());
+  const replay = await handler(turn(session, 'goal-1', clips.greeting, turnId)).then((r) => r.json());
   assert.deepEqual(replay, first);
-  assert.equal((await handler(turn(session, 'greet', clips.greeting))).status, 409);
-  assert.equal((await handler(turn({ ...session, cookie: '' }, 'introduce-name', clips.name))).status, 404);
+  assert.equal((await handler(turn(session, 'goal-1', clips.greeting))).status, 409);
+  assert.equal((await handler(turn({ ...session, cookie: '' }, 'goal-2', clips.name))).status, 404);
   const fresh = await enter(handler, 'basic', randomUUID(), session.cookie);
   assert.notEqual(fresh.sessionId, session.sessionId);
   assert.equal(fresh.view.completed.length, 0);
-  assert.equal(fresh.view.activeGoal, 'greet');
+  assert.equal(fresh.view.activeGoal, 'goal-1');
+});
+
+test('switching levels gets a new agenda, while retries preserve the original agenda', async () => {
+  const planRequests: LevelId[] = [];
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async plan(level) {
+      planRequests.push(level);
+      return lessonRoom.plan(level);
+    },
+  })));
+  const entryId = randomUUID();
+  const [comfortable, duplicate] = await Promise.all([
+    enter(handler, 'comfortable', entryId),
+    enter(handler, 'comfortable', entryId),
+  ]);
+  assert.equal(duplicate.sessionId, comfortable.sessionId);
+  const beginner = await enter(handler, 'beginner', randomUUID(), comfortable.cookie);
+  assert.notEqual(beginner.sessionId, comfortable.sessionId);
+  assert.deepEqual(planRequests, ['comfortable', 'beginner']);
+  assert.equal(comfortable.view.agenda.goals.length, 4);
+  assert.equal(beginner.view.agenda.goals.length, 2);
+  assert.notEqual(beginner.view.agenda.goals[0].title, comfortable.view.agenda.goals[0].title);
+  assert.equal(beginner.view.reply.prompt, beginner.view.agenda.goals[0].practice);
+  assert.deepEqual(Object.keys(beginner.view.agenda.goals[0]), ['id', 'title', 'practice']);
+  const hint = await handler(turn(beginner, 'goal-1')).then((response) => response.json()) as SessionView;
+  assert.equal(hint.reply.english, modelAgenda('beginner').goals[0].hint);
+  assert.deepEqual(hint.agenda, beginner.view.agenda);
+  assert.equal(hint.completed.length, 0);
+});
+
+test('rejects invalid generated agendas and lets the learner retry lesson setup', async () => {
+  let attempts = 0;
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async plan(level) {
+      if (++attempts === 1) return readLessonPlan(JSON.stringify(modelAgenda('comfortable')), level);
+      return lessonRoom.plan(level);
+    },
+  })));
+  const entryId = randomUUID();
+  const invalid = await handler(entryRequest('beginner', entryId));
+  assert.equal(invalid.status, 502);
+  assert.equal(invalid.headers.get('set-cookie'), null);
+  assert.equal((await enter(handler, 'beginner', entryId)).view.agenda.goals.length, 2);
 });
 
 test('closing an active room aborts assessment and does not allow a late result to advance', async () => {
-  const handler = createLessonHandler({
-    ...providers,
-    assess: async (_input, signal) => {
+  const handler = createLessonHandler(fixtureProvider((signal) => ({
+    async evaluate() {
       markStarted();
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
-      return demonstrated(clips.greeting);
+      return { transcript: clips.greeting, result: demonstrated(clips.greeting) };
     },
-  });
+  })));
   let markStarted: () => void = () => {};
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const session = await enter(handler);
-  const late = handler(turn(session, 'greet', clips.greeting));
+  const late = handler(turn(session, 'goal-1', clips.greeting));
   await started;
-  assert.equal((await handler(turn(session, 'greet', clips.greeting))).status, 409);
+  assert.equal((await handler(turn(session, 'goal-1', clips.greeting))).status, 409);
   const response = await handler(new Request(`${base}/${session.sessionId}/end`, {
     method: 'POST', headers: { Cookie: session.cookie },
   }));
@@ -138,51 +380,29 @@ test('closing an active room aborts assessment and does not allow a late result 
 
 test('voice retry uses the accepted reply and leaves assessment unchanged', async () => {
   let audioCalls = 0;
-  const handler = createLessonHandler({
-    ...providers,
-    async speak() {
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async speak(_reply, emit) {
       if (++audioCalls === 1) throw new Error('Temporary voice failure');
-      return new Uint8Array([4, 5, 6]).buffer;
+      emit(new Uint8Array([4, 5, 6, 7]));
     },
-  });
+  })));
   const session = await enter(handler);
-  const view = await handler(turn(session, 'greet', clips.greeting)).then((r) => r.json()) as SessionView;
+  const view = await handler(turn(session, 'goal-1', clips.greeting)).then((r) => r.json()) as SessionView;
   assert.equal(view.completed.length, 1);
   const audio = () => handler(new Request('http://localhost' + view.audioPath, { headers: { Cookie: session.cookie } }));
-  assert.equal((await audio()).status, 502);
-  assert.equal((await audio()).headers.get('content-type'), 'audio/mpeg');
-  assert.equal((await audio()).status, 200);
+  await assert.rejects((await audio()).arrayBuffer(), /Temporary voice failure/);
+  const replay = await audio();
+  assert.equal(replay.headers.get('content-type'), pcmAudioType);
+  assert.deepEqual(await replay.bytes(), new Uint8Array([4, 5, 6, 7]));
+  assert.deepEqual(await (await audio()).bytes(), new Uint8Array([4, 5, 6, 7]));
   assert.equal(audioCalls, 2);
   const opened = await handler(new Request(`${base}/${session.sessionId}/end`, { method: 'POST', headers: { Cookie: session.cookie } }));
   assert.equal(((await opened.json()) as Recap).completed.length, 1);
 });
 
-test('provider adapters use the expected endpoints, authentication, and bilingual playback text', async () => {
-  assert.equal(createProviders({}), null);
-  const calls: [string, RequestInit | undefined][] = [];
-  const adapters = createProviders({
-    INWORLD_API_KEY: 'inworld', OPENAI_API_KEY: 'openai', ELEVENLABS_API_KEY: 'elevenlabs', ELEVENLABS_VOICE_ID: 'jiwon',
-  }, async (url, options) => {
-    calls.push([String(url), options]);
-    if (calls.length === 1) return Response.json({ transcription: { isFinal: true, transcript: clips.greeting } });
-    if (calls.length === 2) return Response.json({
-      status: 'completed',
-      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(demonstrated(clips.greeting)) }] }],
-    });
-    return new Response(new Uint8Array([1, 2, 3]));
-  });
-  assert.ok(adapters);
-  const signal = new AbortController().signal;
-  const transcript = await adapters.transcribe({ type: 'audio/webm', bytes: new Uint8Array([1, 2, 3]) }, signal);
-  const reply = { english: 'Here’s a polite greeting.', korean: '안녕하세요.', prompt: 'Try it.' };
-  const evaluation = await adapters.assess({ goal: 'greet', level: 'beginner', transcript, previousReply: reply }, signal);
-  assert.equal(evaluation.evidence, clips.greeting);
-  assert.equal((await adapters.speak(reply, signal)).byteLength, 3);
-  assert.equal(calls[0][0], 'https://api.inworld.ai/stt/v1/transcribe');
-  assert.equal(new Headers(calls[0][1]?.headers).get('authorization'), 'Basic inworld');
-  assert.equal(JSON.parse(String(calls[0][1]?.body)).transcribeConfig.audioEncoding, 'WEBM');
-  assert.equal(new Headers(calls[1][1]?.headers).get('authorization'), 'Bearer openai');
-  assert.equal(JSON.parse(String(calls[1][1]?.body)).store, false);
-  assert.equal(new Headers(calls[2][1]?.headers).get('xi-api-key'), 'elevenlabs');
-  assert.equal(JSON.parse(String(calls[2][1]?.body)).text, 'Here’s a polite greeting. 안녕하세요. Try it.');
+test('opening a lesson requires an Inworld key', async () => {
+  const handler = createLessonHandler(createRealtimeProvider({}));
+  const response = await handler(entryRequest('beginner'));
+  assert.equal(response.status, 503);
+  assert.match(await response.text(), /Inworld API key/);
 });

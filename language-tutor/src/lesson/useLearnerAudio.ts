@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { maxAudioBytes, maxRecordingMs } from './lesson-contract';
+import { maxPcmBytes, maxRecordingMs, minPcmBytes } from './lesson-contract';
+import { capturePcm } from './capturePcm';
 
-const mimeTypes = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'];
 const stopTracks = (stream?: MediaStream) => stream?.getTracks().forEach((track) => track.stop());
 const constraints = { audio: { echoCancellation: true, noiseSuppression: true }, video: false };
 
 type Capture = {
   stream?: MediaStream;
-  recorder?: MediaRecorder;
+  context?: AudioContext;
+  stop?: () => void;
   timer?: number;
-  cancelled?: boolean;
+  finishing?: boolean;
 };
 
 export function useLearnerAudio(submit: (blob: Blob) => void) {
@@ -22,18 +23,18 @@ export function useLearnerAudio(submit: (blob: Blob) => void) {
 
   const finish = useCallback((cancel = false) => {
     const turn = capture.current;
-    if (!turn || (turn.recorder?.state === 'inactive' && !cancel)) return;
+    if (!turn || (turn.finishing && !cancel)) return;
     window.clearTimeout(turn.timer);
-    if (cancel || !turn.recorder) {
-      turn.cancelled = true;
+    if (cancel || !turn.stop) {
       capture.current = null;
       stopTracks(turn.stream);
+      if (turn.context) void turn.context.close().catch(() => {});
       setStatus('idle');
+      return;
     }
-    if (turn.recorder?.state === 'recording') {
-      if (!cancel) setStatus('finishing');
-      turn.recorder.stop();
-    }
+    turn.finishing = true;
+    setStatus('finishing');
+    turn.stop();
   }, []);
 
   const cancel = useCallback(() => {
@@ -63,7 +64,8 @@ export function useLearnerAudio(submit: (blob: Blob) => void) {
       cancel();
       return;
     }
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === 'undefined' ||
+      typeof AudioWorkletNode === 'undefined' || typeof OfflineAudioContext === 'undefined') {
       setError('Audio recording is unavailable here. Open the lesson in a supported browser on localhost or HTTPS.');
       return;
     }
@@ -92,41 +94,44 @@ export function useLearnerAudio(submit: (blob: Blob) => void) {
     capture.current = turn;
     setStatus('starting');
     try {
+      const context = new AudioContext();
+      turn.context = context;
+      void context.resume().catch(() => {});
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       if (capture.current !== turn) {
         stopTracks(stream);
         return;
       }
       turn.stream = stream;
-      const mimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
-      if (!mimeType) throw new Error('Unsupported audio format');
-      const recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 64_000 });
-      const chunks: Blob[] = [];
-      turn.recorder = recorder;
-      recorder.ondataavailable = (event) => { if (event.data.size > 0) chunks.push(event.data); };
-      recorder.onerror = () => {
-        if (capture.current !== turn) return;
-        finish(true);
-        setError('The microphone was interrupted. Hold to try again.');
-      };
       stream.getAudioTracks().forEach((track) => track.addEventListener('ended', () => {
         if (capture.current !== turn) return;
         finish(true);
         setError('The microphone was disconnected. Reconnect it and try again.');
       }, { once: true }));
-      recorder.onstop = () => {
-        stopTracks(stream);
-        if (capture.current !== turn || turn.cancelled) return;
+      const complete = (blob: Blob) => {
+        if (capture.current !== turn) return;
         capture.current = null;
+        stopTracks(stream);
+        void context.close().catch(() => {});
         setStatus('idle');
-        const blob = new Blob(chunks, { type: recorder.mimeType || mimeType });
-        if (!blob.size || blob.size > maxAudioBytes) {
+        if (blob.size < minPcmBytes || blob.size > maxPcmBytes) {
           setError('That recording could not be used. Hold to try again.');
           return;
         }
         submit(blob);
       };
-      recorder.start();
+
+      const finishPcm = await capturePcm(context, stream);
+      if (capture.current !== turn) return;
+      turn.stop = () => {
+        const pending = finishPcm();
+        stopTracks(stream);
+        void pending.then(complete, () => {
+          if (capture.current !== turn) return;
+          finish(true);
+          setError('That recording could not be used. Hold to try again.');
+        });
+      };
       setStatus('recording');
       turn.timer = window.setTimeout(() => finish(), maxRecordingMs);
     } catch {

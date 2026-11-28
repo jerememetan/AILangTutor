@@ -1,26 +1,31 @@
 import { randomUUID } from 'node:crypto';
-import { koreanTutorId, levelIds, maxAudioBytes } from '../../src/lesson/lesson-contract.ts';
-import type { Recap, SessionView, TutorReply } from '../../src/lesson/lesson-contract.ts';
-import { audioEncodings } from './providers.ts';
-import type { AcceptedAudio, LessonProviders } from './providers.ts';
-import { applyTurn, currentGoal, newProgress, openingReply } from './session.ts';
+import { koreanTutorId, levelIds, maxPcmBytes, minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
+import type { LevelId, Recap, SessionView, TutorReply } from '../../src/lesson/lesson-contract.ts';
+import { applyTurn, currentGoal, newProgress } from './session.ts';
 import type { LessonTurn, Progress } from './session.ts';
-import type { LevelId } from '../../src/lesson/lesson-contract.ts';
+import type { LessonPlan } from './lessonPlan.ts';
+import type { RealtimeProvider, RealtimeRoom } from './inworldRealtime.ts';
 
 const prefix = '/api/lesson/sessions';
-export const maxRequestBytes = maxAudioBytes + 16_384;
+export const maxRequestBytes = maxPcmBytes + 16_384;
 const idleMs = 30 * 60_000;
 const maxSessions = 64;
 const maxTurns = 60;
 const token = /^[a-f0-9-]{36}$/i;
 const cookieName = 'verba_lesson';
 
-type ReplyAudio = { reply: TutorReply; pending?: Promise<ArrayBuffer> };
+type PcmReply = {
+  chunks: Uint8Array[];
+  readers: Set<ReadableStreamDefaultController<Uint8Array>>;
+  done: boolean;
+};
+type ReplyAudio = { reply: TutorReply; pcm?: PcmReply };
 type Session = {
   id: string;
   owner: string;
   entryId: string;
   level: LevelId;
+  plan: LessonPlan;
   progress: Progress;
   latest: SessionView;
   turnResults: Map<string, SessionView>;
@@ -29,9 +34,10 @@ type Session = {
   ended: boolean;
   lastActivity: number;
   controller: AbortController;
+  room: RealtimeRoom;
 };
 
-const json = (data: unknown, status = 200, headers?: HeadersInit) => {
+const json = (data: unknown, status = 200, headers?: ConstructorParameters<typeof Headers>[0]) => {
   const responseHeaders = new Headers(headers);
   responseHeaders.set('Cache-Control', 'no-store');
   return Response.json(data, { status, headers: responseHeaders });
@@ -40,7 +46,7 @@ const problem = (status: number, error: string) => json({ error }, status);
 const browserId = (request: Request) => request.headers.get('cookie')?.match(/(?:^|; )verba_lesson=([a-f0-9-]{36})(?:;|$)/i)?.[1];
 const recap = ({ completed, helpByGoal }: Progress): Recap => ({ completed, helpByGoal });
 
-function writeView(session: Pick<Session, 'id' | 'audio' | 'progress'>, reply: TutorReply): SessionView {
+function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress'>, reply: TutorReply): SessionView {
   const id = randomUUID();
   session.audio.set(id, { reply });
   // Keep the current reply and a few recent replies for replay and network retries.
@@ -50,14 +56,51 @@ function writeView(session: Pick<Session, 'id' | 'audio' | 'progress'>, reply: T
   }
   return {
     ...recap(session.progress),
-    activeGoal: currentGoal(session.progress),
+    agenda: { title: session.plan.title, goals: session.plan.goals.map(({ id, title, practice }) => ({ id, title, practice })) },
+    activeGoal: currentGoal(session.plan, session.progress)?.id ?? null,
     reply,
     audioPath: `${prefix}/${session.id}/audio/${id}`,
   };
 }
 
-export function createLessonHandler(providers: LessonProviders | null) {
+function streamReply(audio: ReplyAudio, room: RealtimeRoom) {
+  if (!audio.pcm) {
+    const pcm: PcmReply = { chunks: [], readers: new Set(), done: false };
+    audio.pcm = pcm;
+    let bytes = 0;
+    void room.speak(audio.reply, (chunk) => {
+      bytes += chunk.byteLength;
+      if (bytes > maxPcmBytes) throw new Error('Tutor audio is too long.');
+      pcm.chunks.push(chunk);
+      for (const reader of pcm.readers) reader.enqueue(chunk);
+    }).then(() => {
+      pcm.done = true;
+      for (const reader of pcm.readers) reader.close();
+      pcm.readers.clear();
+    }, (error: unknown) => {
+      audio.pcm = undefined;
+      for (const reader of pcm.readers) reader.error(error);
+      pcm.readers.clear();
+    });
+  }
+
+  const pcm = audio.pcm;
+  let reader: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of pcm.chunks) controller.enqueue(chunk);
+      if (pcm.done) controller.close();
+      else pcm.readers.add(controller);
+      reader = controller;
+    },
+    cancel() { pcm.readers.delete(reader); },
+  });
+  return new Response(body, { headers: { 'Content-Type': pcmAudioType, 'Cache-Control': 'no-store' } });
+}
+
+export function createLessonHandler(provider: RealtimeProvider | null) {
   const sessions = new Map<string, Session>();
+  const planning = new Map<string, Promise<Session>>();
 
   return async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -65,7 +108,7 @@ export function createLessonHandler(providers: LessonProviders | null) {
       (request.headers.has('origin') && request.headers.get('origin') !== url.origin)) {
       return problem(403, 'Open the lesson from Verba.');
     }
-    if (!providers) return problem(503, 'Live voice is unavailable. Add the lesson provider credentials on the server.');
+    if (!provider) return problem(503, 'Live voice requires an Inworld API key on the lesson server.');
     const now = Date.now();
     for (const [id, session] of sessions) {
       if (now - session.lastActivity <= (session.ended ? 60_000 : idleMs)) continue;
@@ -76,26 +119,49 @@ export function createLessonHandler(providers: LessonProviders | null) {
     const owner = browserId(request);
     const { pathname } = url;
     if (pathname === prefix && request.method === 'POST') {
-      const body = await request.json().catch(() => null);
+      const body = await request.json().catch(() => null) as { level?: unknown; entryId?: unknown; tutorId?: unknown } | null;
       const level = levelIds.find((id) => id === body?.level);
-      if (body?.tutorId !== koreanTutorId || !level || typeof body.entryId !== 'string' || !token.test(body.entryId)) {
+      const entryId = body?.entryId;
+      if (body?.tutorId !== koreanTutorId || !level || typeof entryId !== 'string' || !token.test(entryId)) {
         return problem(400, 'Choose a valid level for Jiwon.');
       }
       const existing = [...sessions.values()].find((candidate) =>
-        owner && candidate.owner === owner && candidate.entryId === body.entryId);
+        owner && candidate.owner === owner && candidate.entryId === entryId);
       if (existing) return json({ sessionId: existing.id, view: existing.latest });
-      if (sessions.size >= maxSessions) return problem(503, 'The practice room is busy. Try again shortly.');
+      const key = `${owner ?? ''}/${entryId}`;
+      let pending = planning.get(key);
+      if (!pending) {
+        if (sessions.size + planning.size >= maxSessions) return problem(503, 'The practice room is busy. Try again shortly.');
+        pending = (async () => {
+          const controller = new AbortController();
+          try {
+            const room = provider.room(controller.signal);
+            const plan = await room.plan(level);
+            const start = {
+              id: randomUUID(), plan, progress: newProgress(), audio: new Map<string, ReplyAudio>(), room,
+            };
+            const session: Session = {
+              ...start, owner: owner ?? randomUUID(), entryId, level,
+              latest: writeView(start, { english: plan.opening, korean: null, prompt: plan.goals[0].practice }),
+              turnResults: new Map(), pendingTurn: false, ended: false, lastActivity: Date.now(), controller,
+            };
+            sessions.set(session.id, session);
+            return session;
+          } catch (error) {
+            controller.abort();
+            throw error;
+          }
+        })().finally(() => planning.delete(key));
+        planning.set(key, pending);
+      }
 
-      const start = { id: randomUUID(), progress: newProgress(), audio: new Map<string, ReplyAudio>() };
-      const session: Session = {
-        ...start, owner: owner ?? randomUUID(), entryId: body.entryId, level,
-        latest: writeView(start, openingReply(level)), turnResults: new Map(),
-        pendingTurn: false, ended: false, lastActivity: now,
-        controller: new AbortController(),
-      };
-      sessions.set(session.id, session);
-      const cookie = `${cookieName}=${session.owner}; HttpOnly; SameSite=Strict; Path=/api/lesson${url.protocol === 'https:' ? '; Secure' : ''}`;
-      return json({ sessionId: session.id, view: session.latest }, 201, { 'Set-Cookie': cookie });
+      try {
+        const session = await pending;
+        const cookie = `${cookieName}=${session.owner}; HttpOnly; SameSite=Strict; Path=/api/lesson${url.protocol === 'https:' ? '; Secure' : ''}`;
+        return json({ sessionId: session.id, view: session.latest }, 201, { 'Set-Cookie': cookie });
+      } catch {
+        return problem(502, 'Jiwon couldn’t prepare your speaking goals. Try starting the lesson again.');
+      }
     }
 
     const match = pathname.match(/^\/api\/lesson\/sessions\/([a-f0-9-]{36})\/(turns|end|audio\/([a-f0-9-]{36}))$/i);
@@ -116,14 +182,7 @@ export function createLessonHandler(providers: LessonProviders | null) {
     if (match[3] && request.method === 'GET') {
       const audio = session.audio.get(match[3]);
       if (!audio) return problem(404, 'This reply is unavailable.');
-      audio.pending ??= providers.speak(audio.reply, session.controller.signal);
-      try {
-        const bytes = await audio.pending;
-        return new Response(bytes, { headers: { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' } });
-      } catch {
-        audio.pending = undefined;
-        return problem(502, 'Jiwon’s audio could not play. Try playing it again.');
-      }
+      return streamReply(audio, session.room);
     }
 
     if (match[2] !== 'turns' || request.method !== 'POST') return problem(405, 'Use a supported lesson action.');
@@ -136,32 +195,28 @@ export function createLessonHandler(providers: LessonProviders | null) {
     }
     const cached = session.turnResults.get(id);
     if (cached) return json(cached);
-    const goal = currentGoal(session.progress);
-    if (session.ended || !goal || form.get('goalId') !== goal || session.pendingTurn) {
+    const goal = currentGoal(session.plan, session.progress);
+    if (session.ended || !goal || form.get('goalId') !== goal.id || session.pendingTurn) {
       return problem(409, 'This turn is no longer active.');
     }
     if (session.turnResults.size >= maxTurns) return problem(429, 'This lesson reached its turn limit. Start a new lesson to keep practising.');
-    const type = file instanceof Blob ? file.type.split(';')[0] : '';
-    if (kind === 'speech' && (!(file instanceof Blob) || !file.size ||
-      file.size > maxAudioBytes || !Object.hasOwn(audioEncodings, type))) {
-      return problem(415, 'This recording could not be used. Try saying it again.');
+    if (kind === 'speech' && (!(file instanceof Blob) || file.type !== pcmAudioType ||
+      file.size < minPcmBytes || file.size > maxPcmBytes || file.size % 2 !== 0)) {
+      return problem(415, 'This recording could not be used. Hold the button while you speak, then try again.');
     }
 
     session.pendingTurn = true;
     try {
-      let turn: LessonTurn = { id, goal, kind: 'hint' };
+      let turn: LessonTurn = { id, goal: goal.id, kind: 'hint' };
       if (kind === 'speech' && file instanceof Blob) {
-        const signal = session.controller.signal;
-        const clip = { type: type as AcceptedAudio, bytes: new Uint8Array(await file.arrayBuffer()) };
-        const transcript = await providers.transcribe(clip, signal);
-        signal.throwIfAborted();
-        const result = transcript ? await providers.assess({
-          goal, level: session.level, transcript, previousReply: session.latest.reply, priorHelp: session.progress.helpByGoal[goal],
-        }, signal) : null;
-        turn = { id, goal, kind, transcript, result };
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const context = {
+          goal, level: session.level, previousReply: session.latest.reply, priorHelp: session.progress.helpByGoal[goal.id],
+        };
+        turn = { id, goal: goal.id, kind, ...await session.room.evaluate(bytes, context) };
       }
       if (session.ended || session.controller.signal.aborted) return problem(409, 'This lesson has ended.');
-      const { progress, reply } = applyTurn(session.progress, turn);
+      const { progress, reply } = applyTurn(session.plan, session.progress, turn);
       session.progress = progress;
       session.latest = writeView(session, reply);
       session.turnResults.set(id, session.latest);

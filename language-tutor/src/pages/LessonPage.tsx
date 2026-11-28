@@ -4,11 +4,11 @@ import { ArrowLeft, Captions, Check, CircleHelp, Mic, MicOff, PhoneOff, Play, Vo
 import TutorAvatar from '../components/TutorAvatar';
 import { getLevel } from '../data/levels';
 import type { Tutor } from '../data/tutors';
-import { goalIds, goals, koreanTutorId } from '../lesson/lesson-contract';
+import { koreanTutorId } from '../lesson/lesson-contract';
 import type { LevelId, Recap } from '../lesson/lesson-contract';
 import { useLearnerAudio } from '../lesson/useLearnerAudio';
 import { useLessonSession } from '../lesson/useLessonSession';
-import { useTutorAudio } from '../lesson/useTutorAudio';
+import { useStreamingTutorAudio } from '../lesson/useStreamingTutorAudio';
 import '../components/TutorStage.css';
 import './LessonPage.css';
 
@@ -36,10 +36,13 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
   const [captions, setCaptions] = useState(true);
   const [sound, setSound] = useState(true);
   const { view, recap, pending } = session;
-  const tutorAudio = useTutorAudio(recap ? undefined : view?.audioPath, sound);
+  const agenda = view?.agenda;
+  const audioPath = recap ? undefined : view?.audioPath;
+  const tutorAudio = useStreamingTutorAudio(audioPath, sound);
   const speaking = tutorAudio.status === 'playing';
   const loadingAudio = tutorAudio.status === 'loading';
   const activeGoal = view?.activeGoal;
+  const activePrompt = agenda?.goals.find((goal) => goal.id === activeGoal)?.practice;
   const holding = mic.status === 'starting' || mic.status === 'recording';
   const capturing = holding || mic.status === 'finishing';
   const ready = Boolean(activeGoal && !recap && !pending && !session.retryable && !speaking && !loadingAudio);
@@ -53,7 +56,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
     : pending || mic.status === 'finishing' ? 'Processing your turn…'
     : loadingAudio ? 'Preparing Jiwon’s audio…'
     : finished ? 'Lesson complete'
-    : view ? 'Your turn' : session.error ? 'Lesson unavailable' : 'Connecting…';
+    : view ? 'Your turn' : session.error ? 'Lesson unavailable' : 'Planning your lesson…';
 
   function end() {
     mic.cancel();
@@ -68,7 +71,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           if (!recap && (capturing || pending || progress.completed.length > 0) &&
             !window.confirm('Leave this call and return to level selection?')) event.preventDefault();
         }}><ArrowLeft aria-hidden="true" size={17} /> Back</Link>
-        <h1>Introduce yourself</h1>
+        <h1>{agenda?.title ?? 'Korean practice'}</h1>
         <span>{tutor.language}</span>
       </div>
 
@@ -143,7 +146,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
               {message && <p className="lesson-error" role="alert">{message}</p>}
               {session.error && (!view || session.retryable) && (
                 <button type="button" className="lesson-secondary" onClick={session.retry}>
-                  {session.retryable ? 'Retry turn' : 'Retry connection'}
+                  {session.retryable ? 'Retry turn' : 'Retry lesson setup'}
                 </button>
               )}
             </div>
@@ -152,23 +155,25 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
 
         <aside className="lesson-agenda" aria-label={recap || finished ? 'Lesson recap' : 'Lesson goals'}>
           <h2>{recap || finished ? 'Lesson recap' : 'Speaking goals'}</h2>
-          <p className="lesson-count" aria-live="polite">{progress.completed.length} of {goalIds.length} completed</p>
-          <progress value={progress.completed.length} max={goalIds.length} aria-label="Speaking goals completed" />
-          <ol className="lesson-goals">
-            {goalIds.map((goal, index) => {
-              const complete = progress.completed.some((item) => item.goal === goal);
-              const current = !recap && activeGoal === goal;
-              return (
-                <li key={goal} aria-current={current ? 'step' : undefined} className={complete ? 'lesson-goal-complete' : undefined}>
-                  <span className="lesson-goal-marker" aria-hidden="true">{complete ? <Check size={14} /> : index + 1}</span>
-                  <div>
-                    <strong>{goals[goal].title}</strong>
-                    {(recap || finished) && <small>{[complete ? 'Demonstrated' : 'Still to practise', progress.helpByGoal[goal]].filter(Boolean).join(' · ')}</small>}
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
+          {agenda && <>
+            <p className="lesson-count" aria-live="polite">{progress.completed.length} of {agenda.goals.length} completed</p>
+            <progress value={progress.completed.length} max={agenda.goals.length} aria-label="Speaking goals completed" />
+            <ol className="lesson-goals">
+              {agenda.goals.map((goal, index) => {
+                const complete = progress.completed.some((item) => item.goal === goal.id);
+                const current = !recap && activeGoal === goal.id;
+                return (
+                  <li key={goal.id} aria-current={current ? 'step' : undefined} className={complete ? 'lesson-goal-complete' : undefined}>
+                    <span className="lesson-goal-marker" aria-hidden="true">{complete ? <Check size={14} /> : index + 1}</span>
+                    <div>
+                      <strong>{goal.title}</strong>
+                      {(recap || finished) && <small>{[complete ? 'Demonstrated' : 'Still to practise', progress.helpByGoal[goal.id]].filter(Boolean).join(' · ')}</small>}
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          </>}
           {(recap || finished) ? (
             <div className="lesson-next">
               {finished && !recap && <p>{reply?.prompt}</p>}
@@ -176,7 +181,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
             </div>
           ) : activeGoal && (
             <div className="lesson-next">
-              <p>{reply?.prompt || goals[activeGoal].practice}</p>
+              <p>{reply?.prompt || activePrompt}</p>
               {!captions && (!sound || tutorAudio.status === 'blocked' || tutorAudio.status === 'error') && reply && (
                 <div className="lesson-text-fallback">
                   <p>{reply.english}</p>

@@ -1,14 +1,16 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { createLessonHandler, maxRequestBytes } from './lesson/handler.ts';
-import { createProviders } from './lesson/providers.ts';
+import { createRealtimeProvider } from './lesson/inworldRealtime.ts';
 
 const port = 8787;
 const clientRoot = fileURLToPath(new URL('../dist', import.meta.url));
-const providers = createProviders(process.env);
-const lesson = createLessonHandler(providers);
+const provider = createRealtimeProvider(process.env);
+const lesson = createLessonHandler(provider);
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.webp': 'image/webp',
@@ -40,7 +42,8 @@ const server = createServer(async (request, response) => {
         method, headers, body: size && method !== 'GET' && method !== 'HEAD' ? Buffer.concat(chunks) : undefined,
       }));
       response.writeHead(result.status, Object.fromEntries(result.headers));
-      response.end(Buffer.from(await result.arrayBuffer()));
+      if (result.body) await pipeline(Readable.fromWeb(result.body), response);
+      else response.end();
       return;
     }
 
@@ -66,12 +69,16 @@ const server = createServer(async (request, response) => {
     });
     response.end(method === 'HEAD' ? undefined : bytes);
   } catch {
-    if (!response.headersSent) response.writeHead(500, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ error: 'The lesson server could not complete the request.' }));
+    if (response.destroyed) return;
+    if (response.headersSent) response.destroy();
+    else {
+      response.writeHead(500, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: 'The lesson server could not complete the request.' }));
+    }
   }
 });
 
 server.listen(port, '127.0.0.1', () => {
   console.log(`Verba lesson API and built app at http://127.0.0.1:${port}`);
-  if (!providers) console.log('Live voice requires the credentials listed in .env.example.');
+  if (!provider) console.log('Set INWORLD_API_KEY in .env.lesson.local to start live lessons.');
 });
