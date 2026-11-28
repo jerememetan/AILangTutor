@@ -27,6 +27,7 @@ export type SessionView = Recap & {
   reply: TutorReply;
   audioPath: string;
   messages: ChatMessage[];
+  transcript?: string | null;
 };
 
 export type OpenLesson = { sessionId: string; view: SessionView };
@@ -39,7 +40,7 @@ export type ChallengeTaskResult = {
   example: string;
 };
 
-type ChallengeMedia = { reply: TutorReply; audioPath: string; messages: ChatMessage[] };
+type ChallengeMedia = { reply: TutorReply; audioPath: string; messages: ChatMessage[]; transcript?: string | null };
 export type ChallengeView =
   | (ChallengeMedia & { status: 'active'; turn: ChallengeTurn })
   | (ChallengeMedia & { status: 'complete'; results: [ChallengeTaskResult, ChallengeTaskResult] })

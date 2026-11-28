@@ -211,6 +211,7 @@ async function submitChallengeTurn(request: Request, session: Session) {
       pushTutorMessage(session, reply);
       challenge.latest = activeChallengeView(session, turn, reply);
     }
+    challenge.latest.transcript = transcript.trim() || null;
     challenge.turnResults.set(id, challenge.latest);
     return json(challenge.latest);
   } catch {
@@ -350,6 +351,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       session.audio.clear();
       session.turnResults.clear();
       session.messages.length = 0;
+      delete session.latest.transcript;
       session.challenge = null;
       return json(recap(session.progress));
     }
@@ -413,6 +415,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       }
       pushTutorMessage(session, reply);
       session.latest = writeView(session, reply);
+      if (turn.kind === 'speech') session.latest.transcript = turn.transcript.trim() || null;
       session.turnResults.set(id, session.latest);
       return json(session.latest);
     } catch {

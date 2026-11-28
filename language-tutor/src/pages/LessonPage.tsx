@@ -54,6 +54,7 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
   const progress: Recap = recap ?? view ?? { completed: [], helpByGoal: {} };
   const finished = Boolean(view && !activeGoal);
   const reply = challenge?.reply ?? lessonMedia?.reply;
+  const transcript = challenge ? challenge.transcript : lessonMedia?.transcript;
   const message = session.error || mic.error;
   const textFallback = !captions && (!sound || tutorAudio.status === 'blocked' || tutorAudio.status === 'error');
   const retryLabel = session.failedAction === 'challenge-start' ? 'Retry challenge setup'
@@ -105,6 +106,13 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
               {reply.korean && <p className="lesson-hangul" lang="ko">{reply.korean}</p>}
               <p>{reply.english} {reply.prompt}</p>
             </div>
+          )}
+          {!pending && !capturing && !session.error && transcript !== undefined && (
+            <p className="lesson-transcript" aria-live="polite">
+              <strong>I heard</strong> {transcript
+                ? <q lang={/\p{Script=Hangul}/u.test(transcript) ? 'ko' : 'en'} dir="auto">{transcript}</q>
+                : <span>No words detected</span>}
+            </p>
           )}
           <div className="lesson-dock">
             <button type="button" className="lesson-control" aria-pressed={mic.armed}
