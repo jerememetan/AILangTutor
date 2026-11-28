@@ -16,7 +16,7 @@ After selecting Han Jiwon, the learner picks a level and enters a one-on-one cal
 
 ## First lesson · Introduce yourself
 
-The learner should be able to greet Jiwon, say their name, and ask hers in Korean. Show those observable goals in the agenda. Use the selected level to choose the first prompt, then adapt to the learner's actual responses.
+Generate a Korean first-meeting agenda when the learner starts the lesson. Use two short speaking goals for New to it, three familiar conversational goals for Know a little, and four more demanding goals for Comfortable speaking. The model writes observable goals, prompts, short hints, examples, and grading criteria. Keep the agenda stable for the call and adapt the coaching to the learner’s actual responses.
 
 1. Ask for one thing and wait for a spoken attempt. Give the learner a chance to recall the phrase.
 2. Assess what they said against the current goal. Accept valid alternative wording. Acknowledge what worked, identify one specific gap if needed, and offer the smallest useful hint.
@@ -30,11 +30,11 @@ Use Jereme's `teach` skill as the reference for turn-taking, feedback, retries, 
 
 The React application and its package lock live in `language-tutor/`. Run npm commands there. Use `npm ci` for a fresh checkout, `npm run dev` for the local app, and `npm run build` to check TypeScript and the production bundle. The frontend uses React, TypeScript, Vite, plain CSS, Lucide React, Three.js, and `@pixiv/three-vrm`.
 
-Run `npm run dev:lesson` from `language-tutor/` to start the lesson API. Inworld transcribes learner audio, OpenAI evaluates spoken evidence and writes coaching, and ElevenLabs voices Jiwon's replies. Keep provider credentials in the server environment or `language-tutor/.env.lesson.local`. Use `npm run test:lesson` to run the lesson tests.
+Run `npm run dev:lesson` from `language-tutor/` to start the lesson API. Verba uses Inworld Realtime for transcription, lesson planning, assessment and coaching with an OpenAI model, and streamed tutor audio. Verba validates the assessment against the learner’s transcript and owns lesson progress. Set `INWORLD_API_KEY` in the server environment or `language-tutor/.env.lesson.local`. Use `npm run test:lesson` to run the lesson tests.
 
 ## Prototype baseline
 
 - The React Router pages are the full-body tutor picker at `/`, the level picker at `/tutors/:tutorId/level`, and the call at `/tutors/:tutorId/lesson`. The `level` query parameter carries the selected level into the lesson. Han Jiwon has the Korean lesson. Other tutors show a preview from the lesson route.
-- The call frames Jiwon waist-up. Holding **Push to speak** captures one learner turn, and release submits it. The server evaluates the answer for the active speaking goal and stores progress in memory for the current run. Jiwon can coach in English, speak Korean examples, and return to the same goal after a question. Three demonstrated goals produce a recap. Refresh starts a new room.
+- The call frames Jiwon waist-up. Holding **Push to speak** captures one learner turn, and release submits it. The server evaluates the answer for the active goal against the criteria generated for that room and stores progress in memory. Jiwon can coach in English, speak Korean examples, and return to the same goal after a question. Demonstrating every goal produces a recap. Refresh starts a new room and generates an agenda.
 - The home viewer caches the current VRM and preloads the next and previous tutors. The current tutor stays on stage until the requested model loads. An illustration is available when WebGL is unavailable. The call uses actual tutor-audio amplitude for mouth motion.
 - The production build, provider contract tests, and simulated lesson flow have passed. The live microphone, bilingual provider output, and 3D framing still need a browser rehearsal with configured accounts.
