@@ -27,13 +27,14 @@ type PcmReply = {
 };
 type ReplyAudio = { reply: SpokenReply; pcm?: PcmReply };
 type OpenChallengeView = Exclude<ChallengeView, { status: 'ended' }>;
+type PendingTurn = { id: string; response: Promise<Response> };
 type ChallengeSession = {
   goals: ChallengeGoals;
   scenario: ChallengeScenario;
   latest: OpenChallengeView;
   firstResult?: ChallengeTaskResult;
   turnResults: Map<string, OpenChallengeView>;
-  pendingTurn: boolean;
+  pendingTurn?: PendingTurn;
 };
 type Session = {
   id: string;
@@ -46,7 +47,7 @@ type Session = {
   messages: ChatMessage[];
   turnResults: Map<string, SessionView>;
   audio: Map<string, ReplyAudio>;
-  pendingTurn: boolean;
+  pendingTurn?: PendingTurn;
   ended: boolean;
   lastActivity: number;
   controller: AbortController;
@@ -61,6 +62,19 @@ const json = (data: unknown, status = 200, headers?: ConstructorParameters<typeo
   return Response.json(data, { status, headers: responseHeaders });
 };
 const problem = (status: number, error: string) => json({ error }, status);
+
+function pendingReply(pending: PendingTurn | undefined, id: string) {
+  if (!pending) return;
+  return pending.id === id
+    ? pending.response.then((response) => response.clone())
+    : problem(409, 'The previous turn is still processing. Try again shortly.');
+}
+
+function processTurn(state: { pendingTurn?: PendingTurn }, id: string, work: () => Promise<Response>) {
+  const response = Promise.resolve().then(work).finally(() => { state.pendingTurn = undefined; });
+  state.pendingTurn = { id, response };
+  return response.then((result) => result.clone());
+}
 const browserId = (request: Request) => request.headers.get('cookie')?.match(/(?:^|; )verba_lesson=([a-f0-9-]{36})(?:;|$)/i)?.[1];
 const recap = ({ completed, helpByGoal }: Progress): Recap => ({ completed, helpByGoal });
 
@@ -143,7 +157,7 @@ async function startChallenge(session: Session) {
     const openingReply = challengeCueReply(scenario.cues[0], scenario.opening, 'warmly');
     pushTutorMessage(session, openingReply);
     const latest = activeChallengeView(session, 1, openingReply);
-    const challenge: ChallengeSession = { goals, scenario, latest, turnResults: new Map(), pendingTurn: false };
+    const challenge: ChallengeSession = { goals, scenario, latest, turnResults: new Map() };
     session.challenge = challenge;
     return challenge;
   })().finally(() => {
@@ -169,17 +183,26 @@ async function submitChallengeTurn(request: Request, session: Session) {
   if (!challenge || session.ended || session.controller.signal.aborted) return turnConflict();
   const cached = challenge.turnResults.get(id);
   if (cached) return json(cached);
+  const pending = pendingReply(challenge.pendingTurn, id);
+  if (pending) return pending;
   const { latest } = challenge;
-  if (latest.status !== 'active' || String(latest.turn) !== submittedTurn || challenge.pendingTurn) return turnConflict();
+  if (latest.status !== 'active' || String(latest.turn) !== submittedTurn) {
+    return json({ error: 'The challenge has moved on. The current turn is ready.', view: latest }, 409);
+  }
   if (challenge.turnResults.size >= maxTurns) return problem(429, 'This challenge reached its turn limit.');
   const file = form?.get('audio');
   if (!isUsableRecording(file)) return problem(415, 'This recording could not be used. Try recording the same turn again.');
 
   const turn = latest.turn;
+  return processTurn(challenge, id, () => assessChallengeTurn(session, challenge, id, file, turn));
+}
+
+async function assessChallengeTurn(
+  session: Session, challenge: ChallengeSession, id: string, file: Blob, turn: ChallengeTurn,
+) {
   const goal = challenge.goals[turn - 1];
   const cue = challenge.scenario.cues[turn - 1];
   const stillOpen = () => !session.ended && !session.controller.signal.aborted && session.challenge === challenge;
-  challenge.pendingTurn = true;
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
     if (!stillOpen()) return turnConflict();
@@ -214,11 +237,11 @@ async function submitChallengeTurn(request: Request, session: Session) {
     challenge.latest.transcript = transcript.trim() || null;
     challenge.turnResults.set(id, challenge.latest);
     return json(challenge.latest);
-  } catch {
+  } catch (error) {
     if (!stillOpen()) return turnConflict();
-    return problem(502, 'The challenge turn couldn’t be processed. Retry this turn.');
+    if (error instanceof InworldRealtimeError) console.warn('[Verba] Challenge turn failed. ' + error.message);
+    return problem(502, 'The challenge turn couldn’t be processed. Retry it or record again.');
   } finally {
-    challenge.pendingTurn = false;
     session.lastActivity = Date.now();
   }
 }
@@ -316,7 +339,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
             const session: Session = {
               ...start, owner: owner ?? randomUUID(), entryId, level,
               latest: writeView(start, openingReply),
-              turnResults: new Map(), pendingTurn: false, ended: false, lastActivity: Date.now(), controller,
+              turnResults: new Map(), ended: false, lastActivity: Date.now(), controller,
             };
             sessions.set(session.id, session);
             return session;
@@ -384,46 +407,50 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
     if (!form || typeof id !== 'string' || !token.test(id) || (kind !== 'speech' && kind !== 'hint')) {
       return problem(400, 'The turn is invalid. Try a new turn.');
     }
+    if (session.ended) return problem(409, 'This lesson has ended.');
     const cached = session.turnResults.get(id);
     if (cached) return json(cached);
+    const pending = pendingReply(session.pendingTurn, id);
+    if (pending) return pending;
     const goal = currentGoal(session.plan, session.progress);
-    if (session.ended || !goal || form.get('goalId') !== goal.id || session.pendingTurn) {
-      return problem(409, 'This turn is no longer active.');
+    if (!goal || form.get('goalId') !== goal.id) {
+      return json({ error: 'The lesson has moved on. The current goal is ready.', view: session.latest }, 409);
     }
     if (session.turnResults.size >= maxTurns) return problem(429, 'This lesson reached its turn limit. Start a new lesson to keep practising.');
     if (kind === 'speech' && !isUsableRecording(file)) {
       return problem(415, 'This recording could not be used. Hold the button while you speak, then try again.');
     }
 
-    session.pendingTurn = true;
-    try {
-      let turn: LessonTurn = { id, goal: goal.id, kind: 'hint' };
-      if (kind === 'speech' && file instanceof Blob) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const context = {
-          goal, level: session.level, previousReply: session.latest.reply, priorHelp: session.progress.helpByGoal[goal.id],
-        };
-        turn = { id, goal: goal.id, kind, ...await session.room.evaluate(bytes, context) };
+    return processTurn(session, id, async () => {
+      try {
+        let turn: LessonTurn = { id, goal: goal.id, kind: 'hint' };
+        if (kind === 'speech' && file instanceof Blob) {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const context = {
+            goal, level: session.level, previousReply: session.latest.reply, priorHelp: session.progress.helpByGoal[goal.id],
+          };
+          turn = { id, goal: goal.id, kind, ...await session.room.evaluate(bytes, context) };
+        }
+        if (session.ended || session.controller.signal.aborted) return problem(409, 'This lesson has ended.');
+        const { progress, reply } = applyTurn(session.plan, session.progress, turn);
+        session.progress = progress;
+        if (turn.kind === 'hint') {
+          pushLearnerMessage(session, 'Asked for a hint', 'hint');
+        } else {
+          pushLearnerMessage(session, turn.transcript, 'speech');
+        }
+        pushTutorMessage(session, reply);
+        session.latest = writeView(session, reply);
+        if (turn.kind === 'speech') session.latest.transcript = turn.transcript.trim() || null;
+        session.turnResults.set(id, session.latest);
+        return json(session.latest);
+      } catch (error) {
+        if (session.ended) return problem(409, 'This lesson has ended.');
+        if (error instanceof InworldRealtimeError) console.warn('[Verba] Speaking turn failed. ' + error.message);
+        return problem(502, 'The turn couldn’t be processed. Retry it or record again.');
+      } finally {
+        session.lastActivity = Date.now();
       }
-      if (session.ended || session.controller.signal.aborted) return problem(409, 'This lesson has ended.');
-      const { progress, reply } = applyTurn(session.plan, session.progress, turn);
-      session.progress = progress;
-      if (turn.kind === 'hint') {
-        pushLearnerMessage(session, 'Asked for a hint', 'hint');
-      } else {
-        pushLearnerMessage(session, turn.transcript, 'speech');
-      }
-      pushTutorMessage(session, reply);
-      session.latest = writeView(session, reply);
-      if (turn.kind === 'speech') session.latest.transcript = turn.transcript.trim() || null;
-      session.turnResults.set(id, session.latest);
-      return json(session.latest);
-    } catch {
-      if (session.ended) return problem(409, 'This lesson has ended.');
-      return problem(502, 'The turn couldn’t be processed. Retry this turn.');
-    } finally {
-      session.pendingTurn = false;
-      session.lastActivity = Date.now();
-    }
+    });
   };
 }

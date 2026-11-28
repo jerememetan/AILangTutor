@@ -44,6 +44,9 @@ const connectSocket: ConnectSocket = (url, headers) => {
 };
 
 const pcm = { type: 'audio/pcm', rate: pcmSampleRate };
+const sttModel = 'inworld/inworld-stt-1';
+const hangul = /\p{Script=Hangul}/u;
+const hanOrKana = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const assessmentTool = {
   type: 'function',
   name: 'assess_speaking_goal',
@@ -160,7 +163,7 @@ function transcribe(socket: WebSocket, signal: AbortSignal, audio: Uint8Array) {
     if (event.type === 'input_audio_buffer.committed') committedId = event.item_id;
     if (!committedId || event.item_id !== committedId) return;
     if (event.type === 'conversation.item.input_audio_transcription.failed') {
-      throw new Error('Inworld could not transcribe the learner audio.');
+      throw new InworldRealtimeError('speech transcription', 'Inworld could not transcribe the recording');
     }
     if (event.type === 'conversation.item.input_audio_transcription.completed') {
       return event.transcript?.trim().slice(0, 1500) ?? '';
@@ -238,7 +241,7 @@ async function requestStructured<T>(
   return result.value;
 }
 
-export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connectSocket): RealtimeProvider | null {
+export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connectSocket, fetcher = fetch): RealtimeProvider | null {
   const apiKey = env.INWORLD_API_KEY;
   if (!apiKey) return null;
   const model = env.INWORLD_LESSON_MODEL || 'openai/gpt-6-luna';
@@ -250,10 +253,45 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
     output_modalities: ['text'],
     max_output_tokens: 350,
     audio: {
-      input: { format: pcm, transcription: { model: 'inworld/inworld-stt-1' }, turn_detection: null },
+      input: { format: pcm, transcription: { model: sttModel }, turn_detection: null },
     },
     providerData: { auto_tool_response: false, stt: { language_hints: ['ko-KR', 'en-US'] } },
   };
+
+  async function transcribeLearner(socket: WebSocket, signal: AbortSignal, audio: Uint8Array) {
+    const transcript = await transcribe(socket, signal, audio);
+    // Auto-detection still handles English help requests. Retry only a likely Korean script mismatch.
+    if (hangul.test(transcript) || !hanOrKana.test(transcript)) return transcript;
+    try {
+      const response = await fetcher('https://api.inworld.ai/stt/v1/transcribe', {
+        method: 'POST',
+        headers: { Authorization: `Basic ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transcribeConfig: {
+            modelId: sttModel,
+            audioEncoding: 'LINEAR16',
+            sampleRateHertz: pcmSampleRate,
+            numberOfChannels: 1,
+            language: 'ko',
+          },
+          audioData: { content: Buffer.from(audio).toString('base64') },
+        }),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
+      });
+      if (response.ok) {
+        const retry = (await response.json())?.transcription?.transcript;
+        const korean = typeof retry === 'string' ? retry.trim().slice(0, 1500) : '';
+        if (hangul.test(korean)) return korean;
+      } else {
+        await response.body?.cancel();
+      }
+    } catch {
+      // A failed secondary transcription leaves the original turn usable.
+      signal.throwIfAborted();
+    }
+    return transcript;
+  }
+
   return {
     room(signal) {
       let socket: WebSocket | undefined;
@@ -266,22 +304,25 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
       };
       signal.addEventListener('abort', disconnect, { once: true });
 
-      async function run<T>(work: (connected: WebSocket) => Promise<T>) {
+      async function run<T>(work: (connected: WebSocket, activeSignal: AbortSignal) => Promise<T>) {
         const next = previous.then(async () => {
           clearTimeout(idleTimer);
+          const timeout = AbortSignal.timeout(40_000);
+          const activeSignal = AbortSignal.any([signal, timeout]);
           try {
-            signal.throwIfAborted();
+            activeSignal.throwIfAborted();
             if (socket?.readyState !== WebSocket.OPEN) {
               const url = `wss://api.inworld.ai/api/v1/realtime/session?key=${randomUUID()}&protocol=realtime`;
               socket = connect(url, { Authorization: `Basic ${apiKey}` });
               const connected = socket;
-              await exchange(connected, signal, 'WebSocket connection', (event) => event.type === 'session.created' ? true : undefined);
-              await exchange(connected, signal, 'session configuration', (event) => event.type === 'session.updated' ? true : undefined,
+              await exchange(connected, activeSignal, 'WebSocket connection', (event) => event.type === 'session.created' ? true : undefined);
+              await exchange(connected, activeSignal, 'session configuration', (event) => event.type === 'session.updated' ? true : undefined,
                 () => send(connected, { type: 'session.update', session }));
             }
-            return await work(socket);
+            return await work(socket, activeSignal);
           } catch (error) {
             disconnect();
+            if (timeout.aborted && !signal.aborted) throw new InworldRealtimeError('lesson request', 'timed out waiting for Inworld');
             throw error;
           } finally {
             // A closed browser tab may leave the room without posting an explicit end request.
@@ -293,7 +334,7 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
       }
 
       function planLesson(level: LevelId) {
-        return run((connected) => {
+        return run((connected, activeSignal) => {
           send(connected, {
             type: 'conversation.item.create',
             item: {
@@ -303,7 +344,7 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
             },
           });
           return requestStructured(
-            connected, signal, planTool, useTools, planInstructions(level),
+            connected, activeSignal, planTool, useTools, planInstructions(level),
             1000, (output) => readLessonPlan(output, level),
           );
         });
@@ -320,24 +361,25 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
             return planLesson(level);
           }
         },
-        evaluate: (audio, context) => run(async (connected) => {
-          const transcript = await transcribe(connected, signal, audio);
-          const result = transcript ? await requestStructured(connected, signal, assessmentTool, useTools, [
+        evaluate: (audio, context) => run(async (connected, activeSignal) => {
+          const transcript = await transcribeLearner(connected, activeSignal, audio);
+          const result = transcript ? await requestStructured(connected, activeSignal, assessmentTool, useTools, [
             assessmentInstructions,
-            'Assess the most recent learner audio item. Earlier turns are context only.',
+            'Assess only the transcript supplied below. Earlier conversation items are context only.',
             JSON.stringify({ ...context, transcript }),
           ].join('\n'), 350, readAssessment) : null;
           return { transcript, result };
         }),
-        planChallenge: (level, goals) => run((connected) => requestStructured(
-          connected, signal, challengePlanTool, useTools, challengeScenarioInstructions(level, goals),
+        planChallenge: (level, goals) => run((connected, activeSignal) => requestStructured(
+          connected, activeSignal, challengePlanTool, useTools, challengeScenarioInstructions(level, goals),
           700, (output) => readChallengeScenario(output, goals),
         )),
-        assessChallenge: (audio, { goal, cue, level }) => run(async (connected) => {
-          const transcript = await transcribe(connected, signal, audio);
+        assessChallenge: (audio, { goal, cue, level }) => run(async (connected, activeSignal) => {
+          const transcript = await transcribeLearner(connected, activeSignal, audio);
           const result = transcript ? await requestStructured(
-            connected, signal, challengeAssessmentTool, useTools,
-            challengeAssessmentInstructions + '\n' + JSON.stringify({ level, criterion: goal.criterion, cue, transcript }),
+            connected, activeSignal, challengeAssessmentTool, useTools,
+            challengeAssessmentInstructions + '\nUse only the transcript supplied below for this assessment.\n' +
+              JSON.stringify({ level, criterion: goal.criterion, cue, transcript }),
             220, readChallengeAssessment,
           ) : null;
           return { transcript, result };

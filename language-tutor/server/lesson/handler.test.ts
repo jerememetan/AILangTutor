@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import viteConfig from '../../vite.config.ts';
-import { minPcmBytes, pcmAudioType } from '../../src/lesson/lesson-contract.ts';
+import { minPcmBytes, pcmAudioType, pcmSampleRate } from '../../src/lesson/lesson-contract.ts';
 import type {
   ChallengeTurn, ChallengeView, ChatMessage, GoalId, LevelId, OpenLesson, Recap, SessionView,
 } from '../../src/lesson/lesson-contract.ts';
@@ -328,6 +328,78 @@ test('the same Inworld room plans a lesson and a challenge and assesses the late
   }
 });
 
+test('retries Chinese or Japanese script as Korean while preserving English questions', async () => {
+  const controller = new AbortController();
+  const audio = new Uint8Array(minPcmBytes).fill(42);
+  const attempts = [
+    { automatic: '你好', expected: clips.greeting, retry: Response.json({ transcription: { transcript: clips.greeting } }) },
+    { automatic: 'こんにちは', expected: clips.name, retry: Response.json({ transcription: { transcript: clips.name } }) },
+    { automatic: clips.help, expected: clips.help },
+    { automatic: clips.greeting, expected: clips.greeting },
+    { automatic: '你好', expected: '你好', retry: new Response(null, { status: 503 }) },
+    { automatic: 'こんにちは', expected: 'こんにちは', retry: Response.json({ transcription: { transcript: '  ' } }) },
+  ];
+  let turnIndex = 0;
+  const retryRequests: unknown[] = [];
+  const provider = createRealtimeProvider(
+    { INWORLD_API_KEY: 'fake' },
+    () => new FakeInworldSocket((socket, event) => {
+      if (event.type === 'session.update') socket.emit({ type: 'session.updated' });
+      const attempt = attempts[turnIndex];
+      if (event.type === 'input_audio_buffer.commit') sendTranscript(socket, attempt.automatic);
+      if (event.type !== 'response.create') return;
+      const context = event.response?.instructions.split('\n').at(-2);
+      assert.equal(JSON.parse(context ?? '{}').transcript, attempt.expected);
+      const name = event.response?.tools?.[0].name;
+      const result = name === 'assess_challenge_turn'
+        ? { verdict: 'demonstrated', evidence: attempt.expected }
+        : demonstrated(attempt.expected);
+      sendToolResult(socket, event, result);
+    }) as unknown as WebSocket,
+    async (url, init) => {
+      retryRequests.push({
+        turnIndex, url, method: init?.method,
+        authorization: new Headers(init?.headers).get('authorization'),
+        body: JSON.parse(String(init?.body)),
+      });
+      return attempts[turnIndex].retry ?? new Response(null, { status: 500 });
+    },
+  );
+  assert.ok(provider);
+  const { goals: [goal] } = readLessonPlan(JSON.stringify(modelAgenda('beginner')), 'beginner');
+  try {
+    const room = provider.room(controller.signal);
+    for (const [index, { expected }] of attempts.entries()) {
+      turnIndex = index;
+      const turn = index === 1
+        ? await room.assessChallenge(audio, { goal, cue: scenario.cues[0], level: 'beginner' })
+        : await room.evaluate(audio, {
+          goal, level: 'beginner', previousReply: { english: '', korean: null, prompt: 'Try a greeting.' },
+        });
+      assert.equal(turn.transcript, expected);
+      assert.equal(turn.result?.evidence, expected);
+    }
+    assert.deepEqual(retryRequests, [0, 1, 4, 5].map((index) => ({
+      turnIndex: index,
+      url: 'https://api.inworld.ai/stt/v1/transcribe',
+      method: 'POST',
+      authorization: 'Basic fake',
+      body: {
+        transcribeConfig: {
+          modelId: 'inworld/inworld-stt-1',
+          audioEncoding: 'LINEAR16',
+          sampleRateHertz: pcmSampleRate,
+          numberOfChannels: 1,
+          language: 'ko',
+        },
+        audioData: { content: Buffer.from(audio).toString('base64') },
+      },
+    })));
+  } finally {
+    controller.abort();
+  }
+});
+
 test('the optional challenge prioritizes earlier help and reveals results after two accepted turns', async () => {
   let planned = 0;
   let assessments = 0;
@@ -575,6 +647,42 @@ test('Realtime reconnects on a retry after the socket drops during transcription
   const retry = await handler(turn(session, 'goal-1', 'pcm', id, pcmClip));
   assert.equal((await retry.json() as SessionView).activeGoal, 'goal-2');
   assert.equal(connections, 2);
+});
+
+test('a concurrent retry shares the original result and a stale recording receives the current goal', async () => {
+  let evaluations = 0;
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const finish = new Promise<void>((resolve) => { release = resolve; });
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async evaluate() {
+      evaluations++;
+      entered();
+      await finish;
+      return { transcript: clips.greeting, result: demonstrated(clips.greeting) };
+    },
+  })), fixtureVoice);
+  const session = await enter(handler);
+  const id = randomUUID();
+  const original = handler(turn(session, 'goal-1', clips.greeting, id));
+  await started;
+  const duplicate = handler(turn(session, 'goal-1', clips.greeting, id));
+  const conflict = await handler(turn(session, 'goal-1', clips.greeting));
+  assert.equal(conflict.status, 409);
+  assert.match((await conflict.json()).error, /still processing/);
+  release();
+  const results = await Promise.all([original, duplicate]);
+  assert.deepEqual(results.map((response) => response.status), [200, 200]);
+  const [accepted, replayed] = await Promise.all(results.map((response) => response.json()));
+  assert.deepEqual(accepted, replayed);
+  assert.equal(accepted.completed.length, 1);
+  assert.equal(evaluations, 1);
+
+  const stale = await handler(turn(session, 'goal-1', clips.greeting));
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).view.activeGoal, 'goal-2');
+  assert.equal(evaluations, 1);
 });
 
 test('runs the basic demo, English question, fresh Korean recall, three goals and recap', async () => {

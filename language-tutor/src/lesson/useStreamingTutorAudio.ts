@@ -109,7 +109,9 @@ export function useStreamingTutorAudio(path: string | undefined, sound: boolean)
 
     async function streamAudio(url: string) {
       try {
-        const response = await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, {
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(35_000)]),
+        });
         if (!response.ok || !response.body || response.headers.get('content-type') !== pcmAudioType) {
           throw new Error('Tutor voice unavailable.');
         }
