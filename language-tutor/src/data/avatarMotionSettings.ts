@@ -34,9 +34,4 @@ export const avatarMotionSettings = {
     amplitudeDegrees: 2.58,
     periodSeconds: 70,
   },
-  speaking: {
-    minimumMouthWeight: 0.13,
-    extraMouthWeight: 0.32,
-    pulsesPerSecond: 1.91,
-  },
 };

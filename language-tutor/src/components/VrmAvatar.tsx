@@ -15,7 +15,8 @@ type VrmAvatarProps = {
   preloadSources?: string[];
   onPreviewReady?: (id: string) => void;
   pickerRotation?: RefObject<number>;
-  speaking?: boolean;
+  framing?: 'call';
+  mouth?: RefObject<number>;
 };
 
 /** Loads a local VRM and renders an animated tutor into its host element. */
@@ -25,7 +26,8 @@ export default function VrmAvatar({
   preloadSources = noPreloads,
   onPreviewReady,
   pickerRotation,
-  speaking = false,
+  framing,
+  mouth,
 }: VrmAvatarProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewer = useRef<{
@@ -33,15 +35,14 @@ export default function VrmAvatar({
     cache: ReturnType<typeof createVrmModelCache>;
     prepare?: (avatar: VRM) => void;
     draw: () => void;
+    resize: () => void;
     model?: LoadedVrm;
     source?: string;
     fallback?: THREE.Group;
   } | null>(null);
   const inPicker = Boolean(previewId);
-  const speakingRef = useRef(speaking);
   const [loaded, setLoaded] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
-  speakingRef.current = speaking;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -66,6 +67,7 @@ export default function VrmAvatar({
       subject,
       cache: createVrmModelCache(inPicker),
       draw: () => renderer.render(scene, camera),
+      resize,
       prepare: warmupTarget
         ? (avatar: VRM) => {
             if (warmed.has(avatar)) return;
@@ -99,17 +101,30 @@ export default function VrmAvatar({
     fill.position.set(3, 1.5, -2);
     scene.add(fill);
 
-    const resize = () => {
-      if (!host.clientWidth || !host.clientHeight) return;
+    function resize() {
+      if (!host || !host.clientWidth || !host.clientHeight) return;
       camera.aspect = host.clientWidth / host.clientHeight;
       if (inPicker) {
         const distance = Math.max(4.65, 1.85 / camera.aspect);
         camera.position.set(0, 1.16, distance);
         camera.lookAt(0, 1.03, 0);
+      } else if (framing === 'call') {
+        const avatar = viewer.current?.model?.avatar;
+        const head = avatar?.humanoid.getNormalizedBoneNode('head');
+        const hips = avatar?.humanoid.getNormalizedBoneNode('hips');
+        const headHeight = head?.getWorldPosition(new THREE.Vector3()).y ?? 1.7;
+        const hipHeight = hips?.getWorldPosition(new THREE.Vector3()).y ?? 0.91;
+        const top = Math.max(headHeight + 0.22, 2.11);
+        const bottom = Math.min(hipHeight - 0.04, top - 0.94);
+        const target = (top + bottom) / 2;
+        const fit = Math.max((top - bottom) / 2, 0.44 / camera.aspect);
+        const distance = fit / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) + 0.22;
+        camera.position.set(0, target, distance);
+        camera.lookAt(0, target, 0);
       }
       camera.updateProjectionMatrix();
       renderer.setSize(host.clientWidth, host.clientHeight, false);
-    };
+    }
     const observer = new ResizeObserver(resize);
     observer.observe(host);
     resize();
@@ -134,7 +149,7 @@ export default function VrmAvatar({
       const model = viewer.current?.model;
       pickerElapsed = model === lastModel && !reducedMotion.matches ? pickerElapsed + delta : 0;
       lastModel = model;
-      model?.updateMotion(inPicker ? pickerElapsed : elapsed, delta, speakingRef.current);
+      model?.updateMotion(inPicker ? pickerElapsed : elapsed, delta, mouth?.current ?? 0);
       state.draw();
     };
     render();
@@ -151,7 +166,7 @@ export default function VrmAvatar({
       renderer.forceContextLoss();
       renderer.domElement.remove();
     };
-  }, [inPicker, pickerRotation]);
+  }, [inPicker, pickerRotation, framing, mouth]);
 
   useEffect(() => {
     const state = viewer.current;
@@ -175,7 +190,8 @@ export default function VrmAvatar({
       state.source = model ? src : undefined;
       if (model) {
         subject.add(model.avatar.scene);
-        if (inPicker) model.updateMotion(0, 0, speakingRef.current);
+        if (inPicker) model.updateMotion(0, 0, 0);
+        if (framing === 'call') state.resize();
       }
       if (state.fallback) subject.add(state.fallback);
       if (previewId) {
@@ -204,7 +220,7 @@ export default function VrmAvatar({
       cancelled = true;
       warmupTimers.forEach((timer) => window.clearTimeout(timer));
     };
-  }, [src, previewId, preloadSources, onPreviewReady, inPicker, pickerRotation]);
+  }, [src, previewId, preloadSources, onPreviewReady, inPicker, pickerRotation, framing]);
 
   return (
     <div

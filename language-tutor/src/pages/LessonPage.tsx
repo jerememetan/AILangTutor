@@ -1,200 +1,193 @@
 import { useState } from 'react';
-import { Link, useNavigate, useOutletContext, useSearchParams } from 'react-router';
-import {
-  ArrowLeft,
-  ArrowRight,
-  BookOpen,
-  Check,
-  ChevronDown,
-  CircleHelp,
-  Mic,
-  MicOff,
-  MoreHorizontal,
-  PhoneOff,
-  Play,
-  RotateCcw,
-  Settings2,
-  Sparkles,
-  Volume2,
-  VolumeX,
-} from 'lucide-react';
+import { Link, useOutletContext, useSearchParams } from 'react-router';
+import { ArrowLeft, Captions, Check, CircleHelp, Mic, MicOff, PhoneOff, Play, Volume2, VolumeX } from 'lucide-react';
 import TutorAvatar from '../components/TutorAvatar';
 import { getLevel } from '../data/levels';
 import type { Tutor } from '../data/tutors';
-
-const curriculum = [
-  { title: 'Warm up: greetings', duration: '2 min' },
-  { title: 'Say your name', duration: '4 min' },
-  { title: 'Ask your tutor a question', duration: '3 min' },
-  { title: 'Review & speaking challenge', duration: '3 min' },
-];
+import { goalIds, goals, koreanTutorId } from '../lesson/lesson-contract';
+import type { LevelId, Recap } from '../lesson/lesson-contract';
+import { useLearnerAudio } from '../lesson/useLearnerAudio';
+import { useLessonSession } from '../lesson/useLessonSession';
+import { useTutorAudio } from '../lesson/useTutorAudio';
+import '../components/TutorStage.css';
+import './LessonPage.css';
 
 export default function LessonPage() {
   const tutor = useOutletContext<Tutor>();
-  const [searchParams] = useSearchParams();
-  const level = getLevel(searchParams.get('level'));
-  const navigate = useNavigate();
-  const [muted, setMuted] = useState(false);
-  const [micOn, setMicOn] = useState(false);
-  const [activeStep, setActiveStep] = useState(1);
+  const [search] = useSearchParams();
+  const level = getLevel(search.get('level')).id;
+  const back = `/tutors/${tutor.id}/level?level=${level}`;
+  if (tutor.id !== koreanTutorId) {
+    return (
+      <main className="lesson-room lesson-preview">
+        <Link className="lesson-back" to={back}><ArrowLeft aria-hidden="true" size={17} /> Back</Link>
+        <h1>{tutor.name} — {tutor.language}</h1>
+        <p>Try the live Korean lesson with Han Jiwon.</p>
+        <Link className="lesson-link" to={`/tutors/${koreanTutorId}/level`}>Choose a Korean level</Link>
+      </main>
+    );
+  }
+  return <LessonRoom key={level} tutor={tutor} level={level} back={back} />;
+}
+
+function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back: string }) {
+  const session = useLessonSession(level);
+  const mic = useLearnerAudio(session.submit);
+  const [captions, setCaptions] = useState(true);
+  const [sound, setSound] = useState(true);
+  const { view, recap, pending } = session;
+  const tutorAudio = useTutorAudio(recap ? undefined : view?.audioPath, sound);
+  const speaking = tutorAudio.status === 'playing';
+  const loadingAudio = tutorAudio.status === 'loading';
+  const activeGoal = view?.activeGoal;
+  const holding = mic.status === 'starting' || mic.status === 'recording';
+  const capturing = holding || mic.status === 'finishing';
+  const ready = Boolean(activeGoal && !recap && !pending && !session.retryable && !speaking && !loadingAudio);
+  const progress: Recap = recap ?? view ?? { completed: [], helpByGoal: {} };
+  const finished = Boolean(view && !activeGoal);
+  const reply = view?.reply;
+  const message = session.error || mic.error;
+  const state = recap ? 'Lesson ended'
+    : speaking ? 'Jiwon is speaking'
+    : holding ? mic.status === 'starting' ? 'Opening microphone…' : 'Recording · release to send'
+    : pending || mic.status === 'finishing' ? 'Processing your turn…'
+    : loadingAudio ? 'Preparing Jiwon’s audio…'
+    : finished ? 'Lesson complete'
+    : view ? 'Your turn' : session.error ? 'Lesson unavailable' : 'Connecting…';
+
+  function end() {
+    mic.cancel();
+    tutorAudio.stop();
+    session.end();
+  }
 
   return (
-    <main className="call-page">
-      <div className="call-heading">
-        <Link className="back-button" to={`/tutors/${tutor.id}/level?level=${level.id}`}>
-          <ArrowLeft size={16} /> Back
-        </Link>
-        <div className="call-title">
-          <span className="call-live-dot" /> Speaking with {tutor.name}
-          <span className="call-language">
-            {tutor.flag} {tutor.language}
-          </span>
-        </div>
-        <button className="icon-button" aria-label="Lesson settings">
-          <Settings2 size={18} />
-        </button>
+    <main className="lesson-room">
+      <div className="lesson-heading">
+        <Link className="lesson-back" to={back} onClick={(event) => {
+          if (!recap && (capturing || pending || progress.completed.length > 0) &&
+            !window.confirm('Leave this call and return to level selection?')) event.preventDefault();
+        }}><ArrowLeft aria-hidden="true" size={17} /> Back</Link>
+        <h1>Introduce yourself</h1>
+        <span>{tutor.language}</span>
       </div>
 
-      <div className="call-layout">
-        <section className="video-call">
-          <div className="video-stage">
-            <div className="stage-room-glow" />
-            <div className="stage-top-label">
-              <span className="online-dot" /> {tutor.name} <span>•</span> Your tutor
-            </div>
-            <TutorAvatar tutor={tutor} large />
-            <div className="subtitle-card">
-              <div className="subtitle-label">{tutor.name} is speaking</div>
-              <p>안녕하세요! 이름이 뭐예요?</p>
-              <small>Hello! What’s your name?</small>
-            </div>
-            <div className="learner-self-view">
-              <div className="self-avatar">J</div>
-              <span>You</span>
-            </div>
-            <div className="call-controls">
-              <button
-                className={`control-button ${micOn ? 'control-active' : ''}`}
-                onClick={() => setMicOn(!micOn)}
-                aria-label={micOn ? 'Mute microphone' : 'Turn on microphone'}
-              >
-                {micOn ? <Mic size={19} /> : <MicOff size={19} />}
-                <small>{micOn ? 'Mic on' : 'Mic off'}</small>
-              </button>
-              <button
-                className="control-button"
-                onClick={() => setMuted(!muted)}
-                aria-label={muted ? 'Turn sound on' : 'Mute sound'}
-              >
-                {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}
-                <small>{muted ? 'Sound off' : 'Sound'}</small>
-              </button>
-              <button className="control-button" aria-label="Captions">
-                <BookOpen size={19} />
-                <small>Captions</small>
-              </button>
-              <button className="control-button" aria-label="More options">
-                <MoreHorizontal size={19} />
-                <small>More</small>
-              </button>
-              <button
-                className="end-call-button"
-                onClick={() => navigate('/')}
-                aria-label="End call"
-              >
-                <PhoneOff size={19} />
-                <small>End lesson</small>
-              </button>
-            </div>
+      <div className="lesson-layout">
+        <section className="lesson-call" aria-label="Tutor call">
+          <div className="lesson-video">
+            <div className="lesson-avatar"><TutorAvatar tutor={tutor} large mouth={tutorAudio.mouth} /></div>
+            <p className="lesson-name">{tutor.name}</p>
+            <div className="lesson-media-state" role="status">{state}</div>
           </div>
-          <div className="call-footer">
-            <span>
-              <span className="secure-dot" /> Private practice room
-            </span>
-            <span>
-              Lesson 01 <b>·</b> Introductions
-            </span>
+          {captions && reply && !recap && (
+            <div className="lesson-captions" aria-label="Tutor captions">
+              {reply.korean && <p className="lesson-hangul" lang="ko">{reply.korean}</p>}
+              <p>{reply.english} {reply.prompt}</p>
+            </div>
+          )}
+          <div className="lesson-dock">
+            <button type="button" className="lesson-control" aria-pressed={mic.armed}
+              disabled={!view || Boolean(recap) || finished} onClick={() => void mic.toggle()}>
+              {mic.armed ? <Mic size={19} /> : <MicOff size={19} />}
+              <span>{mic.armed ? 'Mic on' : mic.status === 'permission' ? 'Opening…' : 'Mic off'}</span>
+            </button>
+            <button type="button" className="lesson-control" aria-pressed={sound}
+              disabled={Boolean(recap) || (!sound && capturing)}
+              onClick={() => { if (sound) tutorAudio.stop(); setSound(!sound); }}>
+              {sound ? <Volume2 size={19} /> : <VolumeX size={19} />}
+              <span>{sound ? 'Sound' : 'Sound off'}</span>
+            </button>
+            <button type="button" className="lesson-control" aria-pressed={captions}
+              onClick={() => setCaptions(!captions)}>
+              <Captions size={19} /><span>Captions</span>
+            </button>
+            <button type="button" className="lesson-control lesson-end" disabled={Boolean(recap)} onClick={end}>
+              <PhoneOff size={19} /><span>End lesson</span>
+            </button>
           </div>
+          {!recap && (
+            <div className="lesson-turn">
+              {activeGoal && (
+                <button
+                  type="button"
+                  className={`lesson-push${holding ? ' is-recording' : ''}`}
+                  disabled={!holding && (!mic.armed || !ready || mic.status === 'finishing')}
+                  onContextMenu={(event) => event.preventDefault()}
+                  onPointerDown={(event) => {
+                    if (!event.isPrimary || event.button !== 0 || !ready) return;
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    void mic.start();
+                  }}
+                  onPointerUp={() => mic.finish()}
+                  onPointerCancel={() => mic.finish(true)}
+                  onLostPointerCapture={() => { if (holding) mic.finish(); }}
+                  onKeyDown={(event) => {
+                    if (event.key !== ' ' && event.key !== 'Enter') return;
+                    event.preventDefault();
+                    if (!event.repeat && ready) void mic.start();
+                  }}
+                  onKeyUp={(event) => {
+                    if (event.key !== ' ' && event.key !== 'Enter') return;
+                    event.preventDefault();
+                    mic.finish();
+                  }}
+                  onBlur={() => mic.finish(true)}
+                ><Mic size={18} aria-hidden="true" />{holding ? 'Release to send' : 'Push to speak'}</button>
+              )}
+              {(tutorAudio.status === 'blocked' || tutorAudio.status === 'error') && (
+                <button type="button" className="lesson-secondary" disabled={capturing || pending} onClick={tutorAudio.play}>
+                  <Play size={15} aria-hidden="true" /> {tutorAudio.status === 'blocked' ? 'Play tutor audio' : 'Retry tutor audio'}
+                </button>
+              )}
+              {activeGoal && !mic.armed && !message && <small>Turn on your mic to speak.</small>}
+              {message && <p className="lesson-error" role="alert">{message}</p>}
+              {session.error && (!view || session.retryable) && (
+                <button type="button" className="lesson-secondary" onClick={session.retry}>
+                  {session.retryable ? 'Retry turn' : 'Retry connection'}
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
-        <aside className="lesson-sidebar">
-          <div className="sidebar-title-row">
-            <div>
-              <div className="eyebrow">TODAY'S LESSON</div>
-              <h2>Introduce yourself</h2>
-            </div>
-            <button className="more-menu" aria-label="More lesson options">
-              <MoreHorizontal size={18} />
-            </button>
-          </div>
-          <div className="lesson-progress">
-            <div className="progress-copy">
-              <span>Lesson progress</span>
-              <b>
-                {activeStep} of {curriculum.length}
-              </b>
-            </div>
-            <div className="progress-track">
-              <span style={{ width: `${Math.round((activeStep / curriculum.length) * 100)}%` }} />
-            </div>
-          </div>
-          <div className="agenda-heading">
-            YOUR PLAN <span>~12 MIN</span>
-          </div>
-          <div className="agenda-list">
-            {curriculum.map((item, index) => {
-              const complete = index < activeStep - 1;
-              const current = index === activeStep - 1;
+        <aside className="lesson-agenda" aria-label={recap || finished ? 'Lesson recap' : 'Lesson goals'}>
+          <h2>{recap || finished ? 'Lesson recap' : 'Speaking goals'}</h2>
+          <p className="lesson-count" aria-live="polite">{progress.completed.length} of {goalIds.length} completed</p>
+          <progress value={progress.completed.length} max={goalIds.length} aria-label="Speaking goals completed" />
+          <ol className="lesson-goals">
+            {goalIds.map((goal, index) => {
+              const complete = progress.completed.some((item) => item.goal === goal);
+              const current = !recap && activeGoal === goal;
               return (
-                <button
-                  key={item.title}
-                  className={`agenda-item ${complete ? 'is-complete' : ''} ${current ? 'is-current' : ''}`}
-                  onClick={() => setActiveStep(index + 1)}
-                >
-                  <span className="agenda-marker">
-                    {complete ? (
-                      <Check size={13} />
-                    ) : current ? (
-                      <Play size={11} fill="currentColor" />
-                    ) : (
-                      <span>{index + 1}</span>
-                    )}
-                  </span>
-                  <span className="agenda-text">
-                    <b>{item.title}</b>
-                    <small>{item.duration}</small>
-                  </span>
-                  {current && <span className="now-label">NOW</span>}
-                </button>
+                <li key={goal} aria-current={current ? 'step' : undefined} className={complete ? 'lesson-goal-complete' : undefined}>
+                  <span className="lesson-goal-marker" aria-hidden="true">{complete ? <Check size={14} /> : index + 1}</span>
+                  <div>
+                    <strong>{goals[goal].title}</strong>
+                    {(recap || finished) && <small>{[complete ? 'Demonstrated' : 'Still to practise', progress.helpByGoal[goal]].filter(Boolean).join(' · ')}</small>}
+                  </div>
+                </li>
               );
             })}
-          </div>
-          <div className="tutor-prompt">
-            <div className="prompt-top">
-              <Sparkles size={14} /> YOUR SPEAKING GOAL
+          </ol>
+          {(recap || finished) ? (
+            <div className="lesson-next">
+              {finished && !recap && <p>{reply?.prompt}</p>}
+              <Link className="lesson-link" to={`/?tutor=${tutor.id}`}>Back to tutors</Link>
             </div>
-            <p>Say your name in Korean, then ask your tutor for theirs.</p>
-            <button className="hint-button">
-              <CircleHelp size={15} /> Need a hint?
-            </button>
-          </div>
-          <div className="sidebar-bottom">
-            <div className="mini-avatar">{tutor.flag}</div>
-            <div>
-              <b>{tutor.name}</b>
-              <small>Adapting to your {level.title.toLowerCase()} level</small>
+          ) : activeGoal && (
+            <div className="lesson-next">
+              <p>{reply?.prompt || goals[activeGoal].practice}</p>
+              {!captions && (!sound || tutorAudio.status === 'blocked' || tutorAudio.status === 'error') && reply && (
+                <div className="lesson-text-fallback">
+                  <p>{reply.english}</p>
+                  {reply.korean && <p lang="ko">{reply.korean}</p>}
+                </div>
+              )}
+              <button type="button" className="lesson-secondary" disabled={!ready || capturing}
+                onClick={() => session.submit()}><CircleHelp size={16} aria-hidden="true" /> Need a hint?</button>
             </div>
-            <ChevronDown size={15} />
-          </div>
+          )}
         </aside>
-      </div>
-
-      <div className="lesson-toast">
-        <RotateCcw size={14} />
-        <span>Your tutor will let you try first, then give a hint if you need one.</span>
-        <button onClick={() => setActiveStep(Math.min(activeStep + 1, curriculum.length))}>
-          Next step <ArrowRight size={13} />
-        </button>
       </div>
     </main>
   );

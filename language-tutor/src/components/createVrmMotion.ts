@@ -58,7 +58,7 @@ export default function createVrmMotion(avatar: VRM, inPicker = false) {
   stance?.(0);
   avatar.humanoid.update();
 
-  return (elapsed: number, delta: number, speaking: boolean) => {
+  return (elapsed: number, delta: number, mouth: number) => {
     const fidget = stance?.(elapsed);
     const swayPhase =
       settings.armSway.periodSeconds > 0
@@ -115,12 +115,7 @@ export default function createVrmMotion(avatar: VRM, inPicker = false) {
     }
     expressions?.setValue('blink', blink);
 
-    const { minimumMouthWeight, extraMouthWeight, pulsesPerSecond } = settings.speaking;
-    const mouth = speaking
-      ? minimumMouthWeight +
-        Math.max(0, Math.sin(elapsed * pulsesPerSecond * fullTurn)) * extraMouthWeight
-      : 0;
-    expressions?.setValue('aa', mouth);
+    expressions?.setValue('aa', MathUtils.clamp(mouth, 0, 1));
     avatar.update(delta);
   };
 }

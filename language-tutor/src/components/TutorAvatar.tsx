@@ -9,6 +9,7 @@ type TutorAvatarProps = {
   preloadSources?: string[];
   onPreviewReady?: (id: string) => void;
   pickerRotation?: RefObject<number>;
+  mouth?: RefObject<number>;
 };
 
 export default function TutorAvatar({
@@ -18,6 +19,7 @@ export default function TutorAvatar({
   preloadSources,
   onPreviewReady,
   pickerRotation,
+  mouth,
 }: TutorAvatarProps) {
   return (
     <div
@@ -38,17 +40,13 @@ export default function TutorAvatar({
       {(tutor.modelPath || showcase) && (
         <VrmAvatar
           src={tutor.modelPath}
-          speaking={large}
+          framing={large ? 'call' : undefined}
+          mouth={mouth}
           previewId={showcase ? tutor.id : undefined}
           preloadSources={preloadSources}
           onPreviewReady={onPreviewReady}
           pickerRotation={pickerRotation}
         />
-      )}
-      {large && (
-        <div className="avatar-live">
-          <span /> LIVE TUTOR
-        </div>
       )}
     </div>
   );
