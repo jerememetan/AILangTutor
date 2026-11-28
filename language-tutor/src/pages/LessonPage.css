@@ -113,8 +113,10 @@
   background: #151924;
   text-align: center;
 }
-.lesson-captions p { margin: 0; font-size: 14px; line-height: 1.45; }
-.lesson-captions .lesson-hangul { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
+.lesson-caption-text { margin: 0; font-size: 15px; line-height: 2.3; overflow-wrap: anywhere; }
+.korean-reading { display: inline-grid; grid-template-rows: auto auto; justify-items: center; vertical-align: baseline; white-space: nowrap; line-height: 1.4; font-weight: 600; margin-block: 3px; }
+.korean-reading-guide { display: block; color: #d5dfff; font-size: 12px; font-weight: 400; line-height: 1.5; letter-spacing: 0.015em; }
+.lesson-captions .korean-reading { font-size: 18px; }
 .lesson-transcript {
   margin: 0;
   padding: 9px 19px;

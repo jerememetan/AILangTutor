@@ -1,15 +1,18 @@
 import { pcmSampleRate } from '../../src/lesson/lesson-contract.ts';
 import type { TutorReply } from '../../src/lesson/lesson-contract.ts';
+import { tutorSpeechParts } from '../../src/lesson/tutor-speech.ts';
 
 export type SpokenReply = TutorReply & { delivery: 'warmly' | 'gently' | 'encouraging' };
 export type TutorVoice = (
   reply: SpokenReply, emit: (chunk: Uint8Array) => void, signal: AbortSignal,
 ) => Promise<void>;
 
-function speechText({ delivery, english, korean, prompt }: SpokenReply) {
-  const explanation = [english, korean].filter(Boolean).join(' ');
-  const nextPrompt = prompt && delivery !== 'encouraging' ? `[encouraging] ${prompt}` : prompt;
-  return [`[${delivery}] ${explanation}`, nextPrompt].filter(Boolean).join(' ');
+function speechText(reply: SpokenReply) {
+  return tutorSpeechParts(reply).map(({ kind, text }, index) => {
+    const delivery = index === 0 ? `[${reply.delivery}] `
+      : kind === 'prompt' && reply.delivery !== 'encouraging' ? '[encouraging] ' : '';
+    return delivery + text;
+  }).join(' ');
 }
 
 export function createElevenLabsVoice(env: NodeJS.ProcessEnv, fetcher = fetch): TutorVoice | null {
