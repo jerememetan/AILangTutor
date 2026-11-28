@@ -10,6 +10,8 @@ import type { ChallengeView, LevelId, Recap } from '../lesson/lesson-contract';
 import { useLearnerAudio } from '../lesson/useLearnerAudio';
 import { useLessonSession } from '../lesson/useLessonSession';
 import { useStreamingTutorAudio } from '../lesson/useStreamingTutorAudio';
+import TutorCaption from '../lesson/TutorCaption';
+import KoreanReading from '../lesson/KoreanReading';
 import '../components/TutorStage.css';
 import './LessonPage.css';
 
@@ -104,14 +106,13 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           </div>
           {captions && reply && !recap && (
             <div className="lesson-captions" aria-label="Tutor captions">
-              {reply.korean && <p className="lesson-hangul" lang="ko">{reply.korean}</p>}
-              <p>{reply.english} {reply.prompt}</p>
+              <TutorCaption reply={reply} />
             </div>
           )}
           {!pending && !capturing && !session.error && transcript !== undefined && (
             <p className="lesson-transcript" aria-live="polite">
               <strong>I heard</strong> {transcript
-                ? <q lang={/\p{Script=Hangul}/u.test(transcript) ? 'ko' : undefined} dir="auto">{transcript}</q>
+                ? <q dir="auto"><KoreanReading text={transcript} /></q>
                 : <span>No words detected</span>}
             </p>
           )}
@@ -232,11 +233,10 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
             </div>
           ) : activeGoal && (
             <div className="lesson-next">
-              <p>{reply?.prompt || activePrompt}</p>
+              <p><KoreanReading text={reply?.prompt || activePrompt || ''} /></p>
               {textFallback && reply && (
                 <div className="lesson-text-fallback">
-                  <p>{reply.english}</p>
-                  {reply.korean && <p lang="ko">{reply.korean}</p>}
+                  <TutorCaption reply={reply} />
                 </div>
               )}
               <button type="button" className="lesson-secondary" disabled={!ready || capturing}
@@ -264,8 +264,7 @@ function ChallengePanel({ challenge, textFallback, tutorId, onBack }: {
       {!complete && <p className="lesson-count" aria-live="polite">Turn {challenge.turn} of 2</p>}
       {textFallback && (
         <div className="lesson-text-fallback">
-          <p>{challenge.reply.english} {challenge.reply.prompt}</p>
-          {challenge.reply.korean && <p lang="ko">{challenge.reply.korean}</p>}
+          <TutorCaption reply={challenge.reply} />
         </div>
       )}
       {complete && (
