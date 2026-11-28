@@ -6,7 +6,10 @@ import type { ChallengeTurn, ChallengeView, GoalId, LevelId, OpenLesson, Recap, 
 const endpoint = '/api/lesson/sessions';
 const turnTimeoutMs = 50_000;
 const setupTimeoutMs = 90_000;
-type PendingTurn = { id: string; goal: GoalId; audio?: Blob };
+type PendingTurn = { id: string; goal: GoalId | null } & (
+  | { kind: 'speech'; audio: Blob }
+  | { kind: 'hint' | 'resume' }
+);
 type LessonAction =
   | { type: 'lesson-turn'; turn: PendingTurn }
   | { type: 'challenge-start' }
@@ -25,11 +28,11 @@ function actionRequest(action: LessonAction): { path: string; body?: FormData } 
     else body.set('kind', 'skip');
     return { path: 'challenge/turns', body };
   }
-  const { id, goal, audio } = action.turn;
+  const { id, goal, kind } = action.turn;
   body.set('turnId', id);
-  body.set('goalId', goal);
-  body.set('kind', audio ? 'speech' : 'hint');
-  if (audio) body.set('audio', audio, 'learner-audio');
+  if (goal) body.set('goalId', goal);
+  body.set('kind', kind);
+  if (kind === 'speech') body.set('audio', action.turn.audio, 'learner-audio');
   return { path: 'turns', body };
 }
 
@@ -118,7 +121,7 @@ export function useLessonSession(level: LevelId) {
     setError('');
     setFailedAction(null);
     const recording = action.type === 'challenge-turn' && Boolean(action.audio) ||
-      (action.type === 'lesson-turn' && Boolean(action.turn.audio));
+      action.type === 'lesson-turn' && action.turn.kind === 'speech';
     setCanRecordAgain(recording);
     retryAction.current = null;
     try {
@@ -130,7 +133,7 @@ export function useLessonSession(level: LevelId) {
         const next = await readJson<SessionView>(response);
         if (!controller.signal.aborted && !ended.current) {
           setView(next);
-          updateMessages(next, !action.turn.audio);
+          updateMessages(next, action.turn.kind === 'hint');
         }
       } else {
         const next = await readJson<ChallengeView>(response);
@@ -180,8 +183,16 @@ export function useLessonSession(level: LevelId) {
       if (audio && challenge?.status === 'active') {
         void send({ type: 'challenge-turn', id: crypto.randomUUID(), turn: challenge.turn, audio });
       }
+    } else if (view && audio) {
+      void send({ type: 'lesson-turn', turn: { id: crypto.randomUUID(), goal: view.activeGoal, kind: 'speech', audio } });
     } else if (view?.activeGoal) {
-      void send({ type: 'lesson-turn', turn: { id: crypto.randomUUID(), goal: view.activeGoal, audio } });
+      lessonControl('hint');
+    }
+  }
+
+  function lessonControl(kind: 'hint' | 'resume') {
+    if (view?.activeGoal && !challengeVisible && !retryAction.current && !roomExpired) {
+      void send({ type: 'lesson-turn', turn: { id: crypto.randomUUID(), goal: view.activeGoal, kind } });
     }
   }
 
@@ -251,7 +262,8 @@ export function useLessonSession(level: LevelId) {
 
   return {
     view, recap, messages: history.messages, pending, error, failedAction, submit, end, challenge, challengeVisible,
-    startChallenge, endChallenge, skipChallengeTurn, recordAgain, canRecordAgain, roomExpired, restartLesson,
+    startChallenge, endChallenge, skipChallengeTurn, resumeLesson: () => lessonControl('resume'),
+    recordAgain, canRecordAgain, roomExpired, restartLesson,
     showChallengeResults: () => { if (challenge?.status === 'complete') setChallengeVisible(true); },
     backToLessonRecap: () => setChallengeVisible(false),
     retry: () => {

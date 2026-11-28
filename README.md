@@ -12,7 +12,7 @@ Verba is a speaking-first language tutor built for an AI voice hackathon. Pick a
 
 The playable lesson is a first meeting in Korean with Han Jiwon. Each call generates a new speaking agenda. **New to it** starts with two short goals, **Know a little** gets three conversational goals, and **Comfortable speaking** gets four more challenging goals.
 
-Hold **Push to speak**, answer in Korean or ask for help in English, then release to send. Jiwon can explain a phrase and give you another try. A goal checks off when your answer demonstrates it. The call ends with a recap of what you practised. Four other tutors are available to preview in the character picker.
+Hold **Push to speak**, then release to send. Answer the current goal in Korean or ask Jiwon about a phrase, politeness, or learning Hangul. You can ask follow-ups, select **Resume speaking goal** when you're ready, and keep talking after the goals are done. A goal checks off when your answer demonstrates it. Four other tutors are available to preview in the character picker.
 
 After you demonstrate the lesson goals, select **Try a speaking challenge** from the recap. Meet Jiwon as an exchange buddy and use two skills you just practised. You can retry a missed prompt or skip it and review it in the results. The results show which skills you demonstrated and give an example for each.
 

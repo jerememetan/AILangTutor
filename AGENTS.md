@@ -21,8 +21,8 @@ Generate a Korean first-meeting agenda when the learner starts the lesson. Use t
 1. Ask for one thing and wait for a spoken attempt. Give the learner a chance to recall the phrase.
 2. Assess what they said against the current goal. Accept valid alternative wording. Acknowledge what worked, identify one specific gap if needed, and offer the smallest useful hint.
 3. After a hint or correction, invite a fresh attempt. Advance the agenda when the learner demonstrates the objective. A tutor example, a button click, or the passage of time is insufficient evidence.
-4. Handle side questions in context. If the learner asks “How do I say that politely?”, answer briefly, then invite them to try the same goal again.
-5. Close by recalling what the learner demonstrated and what needed help. Later, adapt `create-mock-exam` into a spoken challenge using the objectives practised and difficulties observed in this lesson.
+4. Handle side questions and follow-ups in context. If the learner asks about phrasing, Hangul, or another Korean topic, teach it in small steps. Pause the goal while they explore and resume it when they're ready.
+5. Recap what the learner demonstrated and where they needed help. Let them keep talking or start the two-prompt spoken challenge. Keep missed prompts available for another try and show skipped skills as still to practise.
 
 Use Jereme's `teach` skill as the reference for turn-taking, feedback, retries, and evidence of mastery. Its local source is `C:\Users\Jereme\.codex\skills\teach\SKILL.md`. The shared skills are maintained in [learning-skills](https://github.com/jerememetan/learning-skills).
 

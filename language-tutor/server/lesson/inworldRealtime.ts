@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { pcmSampleRate } from '../../src/lesson/lesson-contract.ts';
-import type { LevelId, TutorReply } from '../../src/lesson/lesson-contract.ts';
+import type { ChatMessage, LevelId, TutorReply } from '../../src/lesson/lesson-contract.ts';
 import { assessmentInstructions, assessmentSchema, readAssessment } from './assessment.ts';
 import {
   challengeAssessmentInstructions, challengeAssessmentSchema, challengeScenarioInstructions,
@@ -12,10 +12,12 @@ import type { LessonGoal, LessonPlan } from './lessonPlan.ts';
 import type { Assessment } from './session.ts';
 
 type TurnContext = {
-  goal: LessonGoal;
+  goal: LessonGoal | null;
   level: LevelId;
   previousReply: TutorReply;
   priorHelp?: string;
+  discussing: boolean;
+  recentDialogue: ChatMessage[];
 };
 type RealtimeErrorDetails = { type?: string; code?: string | number; param?: string; message?: string };
 type RealtimeEvent = {
@@ -365,9 +367,9 @@ export function createRealtimeProvider(env: NodeJS.ProcessEnv, connect = connect
           const transcript = await transcribeLearner(connected, activeSignal, audio);
           const result = transcript ? await requestStructured(connected, activeSignal, assessmentTool, useTools, [
             assessmentInstructions,
-            'Assess only the transcript supplied below. Earlier conversation items are context only.',
+            'Respond to the latest transcript supplied below. Earlier conversation items are context only and cannot provide grading evidence.',
             JSON.stringify({ ...context, transcript }),
-          ].join('\n'), 350, readAssessment) : null;
+          ].join('\n'), 450, readAssessment) : null;
           return { transcript, result };
         }),
         planChallenge: (level, goals) => run((connected, activeSignal) => requestStructured(

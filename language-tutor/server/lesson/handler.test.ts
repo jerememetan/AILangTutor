@@ -126,10 +126,10 @@ async function enter(handler: ReturnType<typeof createLessonHandler>, level: Lev
   return { cookie, sessionId, view };
 }
 
-function turn(session: Awaited<ReturnType<typeof enter>>, goal: GoalId, answer?: string, id = randomUUID(), clip?: Blob) {
+function turn(session: Awaited<ReturnType<typeof enter>>, goal: GoalId | null, answer?: string, id = randomUUID(), clip?: Blob) {
   const body = new FormData();
   body.set('turnId', id);
-  body.set('goalId', goal);
+  if (goal) body.set('goalId', goal);
   body.set('kind', answer === undefined ? 'hint' : 'speech');
   if (answer !== undefined) body.set('audio', clip ?? transcriptAudio(answer), 'answer');
   return new Request(`${base}/${session.sessionId}/turns`, {
@@ -383,6 +383,7 @@ test('retries unexpected script as Korean and only assesses usable transcripts',
         ? await room.assessChallenge(audio, { goal, cue: scenario.cues[0], level: 'beginner' })
         : await room.evaluate(audio, {
           goal, level: 'beginner', previousReply: { english: '', korean: null, prompt: 'Try a greeting.' },
+          discussing: false, recentDialogue: [],
         });
       assert.equal(turn.transcript, expected);
       assert.equal(turn.result?.evidence, expected || undefined);
@@ -518,6 +519,66 @@ test('a correct retry of the final challenge prompt demonstrates both skills', a
     { outcome: 'independent', quote: clips.name },
   ]);
 });
+
+test('a Hangul discussion keeps its context, can resume the exercise, and continues after the agenda', async () => {
+  const hangulQuestion = 'How do I learn the characters in Korean?';
+  const followUp = 'How do those two letters fit together?';
+  const translation = 'How do I say thank you?';
+  const hangulReply: Assessment = {
+    verdict: 'discussion', evidence: null, english: 'Hangul letters are grouped into syllable blocks.',
+    korean: 'ㄱ + ㅏ → 가', gaveExample: false,
+  };
+  const handler = createLessonHandler(fixtureProvider(() => ({
+    async evaluate(audio, context) {
+      const transcript = new TextDecoder().decode(audio).replace(/\0+$/, '').trim();
+      if (transcript === hangulQuestion) return { transcript, result: hangulReply };
+      if (transcript === followUp) {
+        assert.equal(context.discussing, true);
+        assert.ok(context.recentDialogue.some((item) => item.speaker === 'learner' && item.text === hangulQuestion));
+        assert.equal(context.previousReply.korean, hangulReply.korean);
+        return { transcript, result: { ...hangulReply, english: 'Put the consonant on the left and the vowel on the right.' } };
+      }
+      if (transcript === translation) {
+        assert.equal(context.goal, null);
+        return { transcript, result: { ...hangulReply, english: 'This is a polite way to thank someone.', korean: '감사합니다.' } };
+      }
+      return lessonRoom.evaluate(audio, context);
+    },
+  })), fixtureVoice);
+  const session = await enter(handler);
+  const say = async (goal: GoalId | null, transcript: string): Promise<SessionView> => {
+    const response = await handler(turn(session, goal, transcript));
+    assert.ok(response.ok);
+    return response.json();
+  };
+  const first = await say('goal-1', hangulQuestion);
+  assert.equal(first.discussing, true);
+  assert.equal(first.reply.prompt, '');
+  assert.equal(first.reply.korean, hangulReply.korean);
+  const follow = await say('goal-1', followUp);
+  assert.match(follow.reply.english, /consonant on the left/);
+  assert.equal(follow.activeGoal, 'goal-1');
+  assert.deepEqual(follow.helpByGoal, {});
+  assert.deepEqual(follow.completed, []);
+
+  const body = new FormData();
+  body.set('kind', 'resume');
+  body.set('goalId', 'goal-1');
+  body.set('turnId', randomUUID());
+  const resumed: SessionView = await handler(new Request(base + '/' + session.sessionId + '/turns', {
+    method: 'POST', body, headers: { Cookie: session.cookie },
+  })).then((response) => response.json());
+  assert.equal(resumed.discussing, false);
+  assert.equal(resumed.reply.prompt, session.view.agenda.goals[0].practice);
+  await say('goal-1', clips.greeting);
+  const completed = await say('goal-2', clips.name);
+  const continued = await say(null, translation);
+  assert.equal(continued.discussing, true);
+  assert.equal(continued.activeGoal, null);
+  assert.equal(continued.reply.korean, '감사합니다.');
+  assert.deepEqual(continued.completed, completed.completed);
+});
+
 test('challenge setup and speech retry after provider errors, and closing discards late assessments', async () => {
   let plans = 0;
   let assessments = 0;
@@ -886,7 +947,7 @@ test('opening a lesson requires an ElevenLabs key and voice ID', async () => {
   }
 });
 
-test('coaching adds gentle and encouraging delivery only to the synthesized speech', async () => {
+test('coaching adds delivery cues only to the synthesized speech', async () => {
   const delivered: string[] = [];
   const voice = createElevenLabsVoice({ ELEVENLABS_API_KEY: 'test', ELEVENLABS_VOICE_ID: 'test' }, async (_url, init) => {
     delivered.push(JSON.parse(String(init?.body)).text);
@@ -903,7 +964,7 @@ test('coaching adds gentle and encouraging delivery only to the synthesized spee
     assert.deepEqual(await audio.bytes(), new Uint8Array([1, 2]));
   }
   assert.deepEqual(delivered, [
-    `[gently] Here’s a polite greeting. 안녕하세요. [encouraging] ${modelGoals[0].practice}`,
+    '[warmly] Here’s a polite greeting. 안녕하세요.',
     `[encouraging] Good practice. Now try it once more from memory. ${modelGoals[0].practice}`,
   ]);
 });

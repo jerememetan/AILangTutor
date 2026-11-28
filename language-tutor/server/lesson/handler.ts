@@ -120,6 +120,7 @@ function writeView(session: Pick<Session, 'id' | 'audio' | 'plan' | 'progress' |
     ...recap(session.progress),
     agenda: { title: session.plan.title, goals: session.plan.goals.map(({ id, title, practice }) => ({ id, title, practice })) },
     activeGoal: currentGoal(session.plan, session.progress)?.id ?? null,
+    discussing: session.progress.discussing,
     ...cacheReply(session, reply),
     messages: snapshotMessages(session.messages),
   };
@@ -424,7 +425,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
     const id = form?.get('turnId');
     const kind = form?.get('kind');
     const file: unknown = form?.get('audio');
-    if (!form || typeof id !== 'string' || !token.test(id) || (kind !== 'speech' && kind !== 'hint')) {
+    if (!form || typeof id !== 'string' || !token.test(id) || (kind !== 'speech' && kind !== 'hint' && kind !== 'resume')) {
       return problem(400, 'The turn is invalid. Try a new turn.');
     }
     if (session.ended) return problem(409, 'This lesson has ended.');
@@ -432,8 +433,11 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
     if (cached) return json(cached);
     const pending = pendingReply(session.pendingTurn, id);
     if (pending) return pending;
+    if (session.challengeStart || session.challenge?.latest.status === 'active') {
+      return problem(409, 'Return to the lesson before talking with Jiwon.');
+    }
     const goal = currentGoal(session.plan, session.progress);
-    if (!goal || form.get('goalId') !== goal.id) {
+    if (form.get('goalId') !== (goal?.id ?? null) || (!goal && kind !== 'speech')) {
       return json({ error: 'The lesson has moved on. The current goal is ready.', view: session.latest }, 409);
     }
     if (session.turnResults.size >= maxTurns) return problem(429, 'This lesson reached its turn limit. Start a new lesson to keep practising.');
@@ -443,20 +447,29 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
 
     return processTurn(session, id, async () => {
       try {
-        let turn: LessonTurn = { id, goal: goal.id, kind: 'hint' };
+        let turn: LessonTurn;
         if (kind === 'speech' && file instanceof Blob) {
           const bytes = new Uint8Array(await file.arrayBuffer());
           const context = {
-            goal, level: session.level, previousReply: session.latest.reply, priorHelp: session.progress.helpByGoal[goal.id],
+            goal: goal ?? null,
+            level: session.level,
+            previousReply: session.latest.reply,
+            priorHelp: goal && session.progress.helpByGoal[goal.id],
+            discussing: session.progress.discussing || !goal,
+            recentDialogue: session.messages.slice(-6),
           };
-          turn = { id, goal: goal.id, kind, ...await session.room.evaluate(bytes, context) };
+          turn = { id, goal: goal?.id ?? null, kind, ...await session.room.evaluate(bytes, context) };
+        } else if (goal && kind !== 'speech') {
+          turn = { id, goal: goal.id, kind };
+        } else {
+          return problem(400, 'The turn is invalid. Try a new turn.');
         }
         if (session.ended || session.controller.signal.aborted) return problem(409, 'This lesson has ended.');
         const { progress, reply } = applyTurn(session.plan, session.progress, turn);
         session.progress = progress;
         if (turn.kind === 'hint') {
           pushLearnerMessage(session, 'Asked for a hint', 'hint');
-        } else {
+        } else if (turn.kind === 'speech') {
           pushLearnerMessage(session, turn.transcript, 'speech');
         }
         pushTutorMessage(session, reply);

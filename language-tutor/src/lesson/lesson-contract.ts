@@ -24,6 +24,7 @@ export type Recap = {
 export type SessionView = Recap & {
   agenda: LessonAgenda;
   activeGoal: GoalId | null;
+  discussing?: boolean;
   reply: TutorReply;
   audioPath: string;
   messages: ChatMessage[];
