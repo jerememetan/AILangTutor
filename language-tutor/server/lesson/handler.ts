@@ -166,6 +166,7 @@ async function submitChallengeTurn(request: Request, session: Session) {
         : 'I didn’t catch that clearly. Try recording again.';
       challenge.latest = activeChallengeView(session, turn, challengeCueReply(cue, lead, 'gently'));
     }
+    challenge.latest.transcript = transcript.trim() || null;
     challenge.turnResults.set(id, challenge.latest);
     return json(challenge.latest);
   } catch {
@@ -297,6 +298,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       session.controller.abort();
       session.audio.clear();
       session.turnResults.clear();
+      delete session.latest.transcript;
       session.challenge = null;
       return json(recap(session.progress));
     }
@@ -354,6 +356,7 @@ export function createLessonHandler(provider: RealtimeProvider | null, voice: Tu
       const { progress, reply } = applyTurn(session.plan, session.progress, turn);
       session.progress = progress;
       session.latest = writeView(session, reply);
+      if (turn.kind === 'speech') session.latest.transcript = turn.transcript.trim() || null;
       session.turnResults.set(id, session.latest);
       return json(session.latest);
     } catch {

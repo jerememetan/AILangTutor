@@ -369,6 +369,7 @@ test('the optional challenge prioritizes earlier help and reveals results after 
   const silence = await answer(1, '');
   assert.equal(silence.status, 'active');
   assert.equal(silence.turn, 1);
+  assert.equal(silence.transcript, null);
   assert.match(silence.reply.english, /recording again/);
   const question = await answer(1, clips.help);
   assert.equal(question.status, 'active');
@@ -381,6 +382,7 @@ test('the optional challenge prioritizes earlier help and reveals results after 
   const second = await answer(1, '안녕하십니까', id);
   assert.equal(second.status, 'active');
   assert.equal(second.turn, 2);
+  assert.equal(second.transcript, '안녕하십니까');
   assert.equal('results' in second, false);
   assert.deepEqual(await answer(1, '안녕하십니까', id), second);
   assert.equal(assessments, 4);
@@ -590,12 +592,14 @@ test('runs the basic demo, English question, fresh Korean recall, three goals an
   }
   const explanation = await say('goal-1', clips.help);
   assert.equal(explanation.completed.length, 0);
+  assert.equal(explanation.transcript, clips.help);
   assert.equal(explanation.reply.korean, '안녕하세요.');
   assert.equal((await say('goal-1', clips.greeting)).completed.length, 0);
   assert.equal((await say('goal-1', clips.greeting)).activeGoal, 'goal-2');
   assert.equal((await say('goal-2', clips.name)).activeGoal, 'goal-3');
   const final = await say('goal-3', clips.question);
   assert.equal(final.activeGoal, null);
+  assert.equal(final.transcript, clips.question);
   assert.deepEqual(final.completed.map((item) => item.quote), [clips.greeting, clips.name, clips.question]);
   assert.equal(final.helpByGoal['goal-1'], 'Asked for an explanation.');
   assert.match(final.reply.english, /finished all your speaking goals/);
@@ -604,11 +608,13 @@ test('runs the basic demo, English question, fresh Korean recall, three goals an
 test('progress requires grounded Korean speech and remains zero on silence, invalid evidence, or hint', async () => {
   const handler = createLessonHandler(fixtureProvider(), fixtureVoice);
   const session = await enter(handler);
+  assert.equal(session.view.transcript, undefined);
   for (const answer of [undefined, ' ', clips.badQuote]) {
     const response = await handler(turn(session, 'goal-1', answer));
     const view = await response.json() as SessionView;
     assert.equal(view.activeGoal, 'goal-1');
     assert.equal(view.completed.length, 0);
+    assert.equal(view.transcript, answer === undefined ? undefined : answer.trim() || null);
   }
   const wrongFormat = await handler(turn(session, 'goal-1', 'hello', randomUUID(), new Blob(['hi'], { type: 'text/plain' })));
   assert.equal(wrongFormat.status, 415);
