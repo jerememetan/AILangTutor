@@ -65,6 +65,11 @@ export function useLessonSession(level: LevelId) {
   const retryAction = useRef<LessonAction | null>(null);
   const ended = useRef(false);
 
+  function updateMessages(next: ChatMessage[] | null | undefined) {
+    // An older lesson server may omit chat history. Keep the last available snapshot.
+    if (Array.isArray(next)) setMessages(next);
+  }
+
   useEffect(() => {
     const controller = new AbortController();
     const close = () => {
@@ -92,7 +97,7 @@ export function useLessonSession(level: LevelId) {
         }
         id.current = opened.sessionId;
         setView(opened.view);
-        setMessages(opened.view.messages);
+        updateMessages(opened.view.messages);
       } catch (reason) {
         if (!controller.signal.aborted && !ended.current) {
           setError(timeout.aborted ? 'Lesson setup took too long. Try again.'
@@ -124,14 +129,14 @@ export function useLessonSession(level: LevelId) {
         const next = await readJson<SessionView>(response);
         if (!controller.signal.aborted && !ended.current) {
           setView(next);
-          setMessages(next.messages);
+          updateMessages(next.messages);
         }
       } else {
         const next = await readJson<ChallengeView>(response);
         if (!controller.signal.aborted && !ended.current) {
           setChallenge(next);
           setChallengeVisible(next.status !== 'ended');
-          if (next.status !== 'ended') setMessages(next.messages);
+          if (next.status !== 'ended') updateMessages(next.messages);
         }
       }
       if (!controller.signal.aborted) setCanRecordAgain(false);
@@ -141,11 +146,11 @@ export function useLessonSession(level: LevelId) {
         const current = reason.currentView;
         if (action.type === 'lesson-turn' && 'agenda' in current) {
           setView(current);
-          setMessages(current.messages);
+          updateMessages(current.messages);
         } else if (action.type === 'challenge-turn' && 'status' in current) {
           setChallenge(current);
           setChallengeVisible(current.status !== 'ended');
-          if (current.status !== 'ended') setMessages(current.messages);
+          if (current.status !== 'ended') updateMessages(current.messages);
         }
         setCanRecordAgain(false);
         setError(reason.message);
