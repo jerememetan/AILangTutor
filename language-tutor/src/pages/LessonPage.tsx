@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useOutletContext, useSearchParams } from 'react-router';
 import { ArrowLeft, Captions, Check, CircleHelp, Mic, MicOff, PhoneOff, Play, Volume2, VolumeX } from 'lucide-react';
+import ChatHistoryPanel from '../components/ChatHistoryPanel';
 import TutorAvatar from '../components/TutorAvatar';
 import { getLevel } from '../data/levels';
 import type { Tutor } from '../data/tutors';
@@ -175,10 +176,11 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
           )}
         </section>
 
-        {challenge ? <ChallengePanel challenge={challenge} textFallback={textFallback} tutorId={tutor.id} onBack={() => {
-          tutorAudio.stop();
-          session.backToLessonRecap();
-        }} /> : <aside className="lesson-agenda" aria-label={recap || finished ? 'Lesson recap' : 'Lesson goals'}>
+        <aside className="lesson-sidebar" aria-label="Lesson goals and chat history">
+          {challenge ? <ChallengePanel challenge={challenge} textFallback={textFallback} tutorId={tutor.id} onBack={() => {
+            tutorAudio.stop();
+            session.backToLessonRecap();
+          }} /> : <section className="lesson-agenda" aria-label={recap || finished ? 'Lesson recap' : 'Lesson goals'}>
           <h2>{recap || finished ? 'Lesson recap' : 'Speaking goals'}</h2>
           {agenda && <>
             <p className="lesson-count" aria-live="polite">{progress.completed.length} of {agenda.goals.length} completed</p>
@@ -226,7 +228,9 @@ function LessonRoom({ tutor, level, back }: { tutor: Tutor; level: LevelId; back
                 onClick={() => session.submit()}><CircleHelp size={16} aria-hidden="true" /> Need a hint?</button>
             </div>
           )}
-        </aside>}
+          </section>}
+          <ChatHistoryPanel tutorName={tutor.name} messages={session.messages} />
+        </aside>
       </div>
     </main>
   );
@@ -240,7 +244,7 @@ function ChallengePanel({ challenge, textFallback, tutorId, onBack }: {
 }) {
   const complete = challenge.status === 'complete';
   return (
-    <aside className="lesson-agenda" aria-label={complete ? 'Challenge results' : 'Speaking challenge'}>
+    <section className="lesson-agenda" aria-label={complete ? 'Challenge results' : 'Speaking challenge'}>
       <h2>{complete ? 'Challenge results' : 'Speaking challenge'}</h2>
       {!complete && <p className="lesson-count" aria-live="polite">Turn {challenge.turn} of 2</p>}
       {textFallback && (
@@ -270,6 +274,6 @@ function ChallengePanel({ challenge, textFallback, tutorId, onBack }: {
           </div>
         </>
       )}
-    </aside>
+    </section>
   );
 }
